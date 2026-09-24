@@ -177,3 +177,5 @@ The Map & Conflict page is now India-wide and uses a 5 km route corridor. It com
 ## Route Analysis: real-first minimum 5 display
 
 Route Analysis prioritizes real geographically matched project records. When fewer than five real records are available for a selected corridor, clearly labelled `DEMO / SIMULATED` cards are placed along the actual route until five project cards are available. Demo records are excluded from verified-project counts and route-impact evidence scoring.
+#   I n f r a - r i s k - r a d a r  
+ 
