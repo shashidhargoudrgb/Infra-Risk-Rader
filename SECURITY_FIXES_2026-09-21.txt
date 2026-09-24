@@ -1,0 +1,23 @@
+INFRA RISK RADAR - SECURITY / VULNERABILITY FIX
+================================================
+
+1. Updated Vite from 5.4.10 to ^8.3.0.
+2. Updated @vitejs/plugin-react from 4.3.4 to ^6.1.1.
+3. Changed the Vite development server host from 0.0.0.0 to localhost.
+   This prevents the development server from being exposed to the local network.
+4. No application/business logic, API endpoints, project data, map logic,
+   route matching, PAIMANA logic, ML/risk calculations, Actions or Dependencies
+   logic were changed.
+5. Backend has no third-party npm dependencies and continues to use Node's
+   built-in HTTP/crypto/fs modules.
+
+RUN:
+  cd backend
+  npm install
+  npm start
+
+  cd frontend
+  npm install
+  npm run dev
+
+Node.js 22 LTS is recommended.

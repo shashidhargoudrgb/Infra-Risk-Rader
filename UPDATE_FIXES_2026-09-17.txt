@@ -1,0 +1,34 @@
+Infra Risk Radar — fixes applied
+
+1. Map & Conflict
+- Keeps route calculation fast and separate from slower public project-source lookups.
+- PAIMANA April-2026 records are now matched using selected endpoints and OSRM road names/highway references first (for example NH references), with a small reverse-geocode fallback.
+- PAIMANA matches are displayed on/near the route as clearly labelled "PAIMANA monitoring candidate" records when only locality/road text can be established.
+- Exact route counts/risk impact exclude approximate PAIMANA candidates. Exact route matching remains geometry-based.
+- Live route lookup now receives route road names so PAIMANA road-reference matching can work nationally.
+
+2. PAIMANA data mapping
+- Normalized PAIMANA fields startDate, targetCompletion, revisedCompletion and revisedCost into the UI schema.
+- Derived financial progress from expenditure/revised cost when the source provides those values.
+- This removes avoidable "Not available" fields in reports and project details.
+
+3. PAIMANA Risk Map
+- Dashboard map now works as a state-level PAIMANA risk portfolio map using the 1,981 April-2026 records.
+- State polygons are coloured/annotated from project risk counts. It does not pretend that PAIMANA's national snapshot provides GPS coordinates for every project.
+
+4. Analytics readiness
+- No fabricated ML accuracy percentage was added.
+- The application continues to distinguish evidence-based risk scoring from validated ML accuracy.
+
+5. Reports
+- Time Delay now calculates planned duration from start -> target completion and elapsed/actual duration from start -> current date or actual completion.
+- Delay is calculated from an actual completion date for completed projects, or from an overdue target date for ongoing projects.
+- Progress tables use normalized physical progress and derived financial progress where available.
+
+6. Scrolling / sticky behaviour
+- Removed the nested 100vh/overflow setup that made the Map & Conflict map feel sticky while the right panel scrolled independently.
+- Map, project cards and project detail now participate in normal page scrolling.
+
+Verification
+- Backend syntax verified with: node --check backend/server.js
+- Frontend dependency installation/build could not be run in this environment because npm registry/network access was unavailable; the project package files remain unchanged.

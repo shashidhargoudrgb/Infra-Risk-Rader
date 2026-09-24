@@ -1,0 +1,881 @@
+import React, {useEffect, useMemo, useRef, useState} from 'react';
+import {createRoot} from 'react-dom/client';
+import {BrowserRouter, Routes, Route, Link, NavLink, Navigate, useNavigate, useParams} from 'react-router-dom';
+import {BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, LineChart, Line, CartesianGrid, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar, Legend} from 'recharts';
+import L from 'leaflet';
+import {MapContainer, TileLayer, GeoJSON, CircleMarker, Popup, Polyline, Marker, useMap} from 'react-leaflet';
+import 'leaflet/dist/leaflet.css';
+import './styles.css';
+
+const API = (import.meta.env.VITE_API_URL || '/api').replace(/\/$/, '');
+const DEMO_MODE = false;
+
+const initialAlerts = [];
+const sectors = [];
+const trend = [];
+
+// --- PAIMANA (MoSPI/IPMD) national portfolio context — SIH 26103 ---
+// OCMS (since 2006) was modernized into PAIMANA. These figures are official portfolio context,
+// not local project records used for route matching.
+const paimanaOverview = {
+  asOf:'April 2026', totalProjects:1981, ministries:'17', sectors:'Multiple',
+  originalCostLakhCr:37.13, revisedCostLakhCr:42.78, expenditureLakhCr:20.36,
+  legacySystem:'OCMS — Online Computerised Monitoring System (since 2006)',
+  currentSystem:'PAIMANA — Project Assessment, Infrastructure Monitoring and Analytics for Nation-building',
+  owner:'Infrastructure & Project Monitoring Division (IPMD), Ministry of Statistics and Programme Implementation',
+  topSectors:['Transport & Logistics','Energy','Water & Sanitation','Communication','Social Infrastructure','Coal','Steel','Mining'],
+};
+// Official April 2026 PAIMANA breakdown from the MoSPI/PIB flash report.
+const paimanaSectorData = [
+  {name:'Transport & Logistics',projects:1459,revisedCost:23.34,expenditure:11.59},
+  {name:'Energy',projects:221,revisedCost:11.30,expenditure:5.33},
+  {name:'Water & Sanitation',projects:67,revisedCost:2.30,expenditure:1.65},
+  {name:'Communication',projects:12,revisedCost:0.91,expenditure:0.77},
+  {name:'Social & Commercial',projects:77,revisedCost:2.73,expenditure:0.35},
+  {name:'Others',projects:145,revisedCost:2.21,expenditure:0.67},
+];
+const paimanaMinistryData = [
+  {name:'Road Transport & Highways',projects:1137}, {name:'Railways',projects:260},
+  {name:'Coal',projects:128}, {name:'Petroleum & Natural Gas',projects:112},
+  {name:'Power',projects:102}, {name:'Housing & Urban Affairs',projects:51},
+  {name:'Water Resources',projects:48}, {name:'Higher Education',projects:30},
+  {name:'Civil Aviation',projects:26}, {name:'Health & Family Welfare',projects:23},
+  {name:'Steel',projects:19}, {name:'Telecommunications',projects:12},
+  {name:'Labour & Employment',projects:11}, {name:'DPIIT',projects:8},
+  {name:'Ports, Shipping & Waterways',projects:7}, {name:'Mines',projects:6}, {name:'Sports',projects:1},
+];
+// CUF = Common Upload Form — fields the PAIMANA/OCMS framework already captures monthly.
+const cufFields = [
+  {field:'Approved (Original) Cost', used:true},
+  {field:'Revised Cost', used:true},
+  {field:'Cumulative Expenditure', used:true},
+  {field:'Physical Progress (%)', used:true},
+  {field:'Implementation Timelines (Start / Completion)', used:true},
+  {field:'Milestones', used:true},
+  {field:'Implementing Agency', used:true},
+  {field:'Project Status', used:true},
+];
+// Variables not presently in the CUF — proposed additions used to test technical dimension (c):
+// how much predictive lift comes from CUF fields vs variables beyond the CUF.
+const additionalVariables = [
+  'Land acquisition / right-of-way status', 'Environmental & statutory clearance status',
+  'Contractor performance / dispute history', 'Input material price index exposure',
+  'Route/geospatial conflict with other infra projects', 'Drone / satellite-verified physical progress',
+  'Weather & monsoon exposure window', 'Local litigation / public resistance signals',
+];
+
+function authHeaders(extra={}){
+  const s=getSession(); return {...extra,...(s?.token?{Authorization:`Bearer ${s.token}`}:{})};
+}
+function normalizeProjectRecord(p){
+  const x={...p};
+  // PAIMANA April-2026 records use the official field names startDate /
+  // targetCompletion / revisedCompletion / revisedCost. The UI uses a shorter
+  // common schema, so normalize once here instead of showing 'Not available'.
+  if(x.start==null||x.start==='') x.start=x.startDate||null;
+  if(x.targetCompletion==null||x.targetCompletion==='') x.targetCompletion=x.targetCompletion||null;
+  if(x.completion==null||x.completion==='') x.completion=x.revisedCompletion||x.targetCompletion||null;
+  if(x.cost==null||x.cost==='') x.cost=x.revisedCost??x.originalCost??null;
+  if(x.originalCost==null||x.originalCost==='') x.originalCost=x.approvedCost??null;
+  if(x.expenditure==null||x.expenditure==='') x.expenditure=x.cumulativeExpenditure??null;
+  if(x.financialProgress==null && Number.isFinite(Number(x.expenditure)) && Number(x.cost)>0){
+    x.financialProgress=Math.max(0,Math.min(100,Math.round(Number(x.expenditure)/Number(x.cost)*1000)/10));
+  }
+  if(x.progress==null && x.physicalProgress!=null) x.progress=Number(x.physicalProgress);
+  if(x.status==null||x.status==='') x.status='Ongoing';
+  return x;
+}
+function useProjects(){
+  const [projects,setProjects]=useState([]);
+  const load=()=>fetch(`${API}/projects`,{headers:authHeaders({Accept:'application/json'})}).then(r=>{if(!r.ok)throw new Error('Project registry unavailable');return r.json()});
+  useEffect(()=>{let live=true;load().then(rows=>{if(live)setProjects(Array.isArray(rows)?rows.map(normalizeProjectRecord):[])}).catch(()=>{if(live)setProjects([])});return()=>{live=false}},[]);
+  return [projects,setProjects];
+}
+function useAlerts(){
+ const [alerts,setAlerts]=useState([]);
+ useEffect(()=>{let live=true;fetch(`${API}/alerts`,{headers:authHeaders()}).then(r=>r.ok?r.json():[]).then(x=>{if(live)setAlerts(Array.isArray(x)?x:[])}).catch(()=>{if(live)setAlerts([])});return()=>{live=false}},[]);
+ return [alerts,setAlerts];
+}
+function riskClass(r){ return String(r||'Low').toLowerCase().replace(' ','-'); }
+
+function getSession(){try{return JSON.parse(localStorage.getItem('irr_session')||'null')}catch{return null}}
+function setSession(data){localStorage.setItem('irr_session',JSON.stringify(data))}
+async function logout(){
+  try{await fetch(`${API}/auth/logout`,{method:'POST',headers:authHeaders()})}catch{}
+  localStorage.removeItem('irr_session');window.location.href='/login';
+}
+async function reauthenticateAdmin(){
+ const key=window.prompt('Enter Administrator Key to authorize this change:'); if(!key)return false;
+ const r=await fetch(`${API}/auth/verify-key`,{method:'POST',headers:authHeaders({'Content-Type':'application/json'}),body:JSON.stringify({adminKey:key})});
+ const d=await r.json().catch(()=>({})); if(!r.ok){alert(''+(d.error||'Administrator authentication failed.'));return false} return true;
+}
+function Login(){
+ const navigate=useNavigate(); const [mode,setMode]=useState('login'); const [role,setRole]=useState('General User'); const [email,setEmail]=useState(''); const [password,setPassword]=useState(''); const [name,setName]=useState(''); const [adminKey,setAdminKey]=useState(''); const [error,setError]=useState(''); const [notice,setNotice]=useState(''); const [keyExists,setKeyExists]=useState(false);
+ useEffect(()=>{fetch(`${API}/auth/status`).then(r=>r.json()).then(d=>setKeyExists(Boolean(d.keyExists))).catch(()=>{});},[]);
+ const submit=async(e)=>{e.preventDefault();setError('');setNotice('');try{
+   if(mode==='register'){
+     const r=await fetch(`${API}/auth/register`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,email,password,role,adminKey})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Registration failed');setSession(d);setNotice(`${role} account created successfully.`);navigate('/');return;
+   }
+   const r=await fetch(`${API}/auth/login`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password,role,adminKey})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Login failed');setSession(d);navigate('/');
+ }catch(e){setError(e.message)}};
+ const generateKey=async()=>{setError('');setNotice('');try{const r=await fetch(`${API}/auth/key/generate`,{method:'POST',headers:authHeaders({'Content-Type':'application/json'})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Could not generate administrator key');setAdminKey(d.key);setKeyExists(true);setNotice(d.firstSetup?'Administrator key generated. Save it securely.':'New administrator key generated successfully.');}catch(e){setError(e.message)}};
+ return <div className="login-page"><div className="login-visual"><div className="login-orb">◈</div><h1>Infra Risk Radar</h1><p>Smarter Infrastructure. Safer Tomorrow.</p><div className="login-features"><span>✓ Predictive risk monitoring</span><span>✓ Cost & time forecasting</span><span>✓ Route conflict detection</span><span>✓ EVM & physical progress</span></div></div><div className="login-card"><div className="brand compact"><div className="brand-mark">◆</div><div>Infra Risk Radar</div></div><h2>{mode==='login'?'Welcome Back':'Create Account'}</h2><p className="muted">{mode==='login'?'Sign in to continue to the monitoring platform':'Create a portal account'}</p>
+ <div className="role-switch"><button type="button" className={role==='General User'?'active':''} onClick={()=>{setRole('General User');setError('')}}>General User</button><button type="button" className={role==='Administrator'?'active':''} onClick={()=>{setRole('Administrator');setError('')}}>Administrator</button></div>
+ <form onSubmit={submit}>{mode==='register'&&<Field label="Full Name"><input value={name} onChange={e=>setName(e.target.value)} placeholder="Your name" required/></Field>}<Field label="Email address"><input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="name@gov.in" required/></Field><Field label="Password"><input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="Password (min 6 characters)" minLength="6" required/></Field>
+ {role==='Administrator'&&<Field label="Administrator Key"><div className="inline-field"><input value={adminKey} onChange={e=>setAdminKey(e.target.value)} placeholder="Enter administrator key" required={role==='Administrator'}/>{!keyExists&&<button type="button" className="ghost" onClick={generateKey}>Generate</button>}</div>{keyExists&&mode==='login'&&<small className="field-help">Use the administrator key created during initial setup.</small>}</Field>}
+ {error&&<div className="form-note error">{error}</div>}{notice&&<div className="form-note success">{notice}</div>}<button className="primary login-submit">{mode==='login'?'Sign In':'Create Account'}</button></form>
+ <div className="login-demo">{role==='Administrator'?'Administrator actions require backend authentication and the administrator key.':'General users have view/search access only.'}</div>
+ <button className="link-button" onClick={()=>{setMode(mode==='login'?'register':'login');setError('');setNotice('')}}>{mode==='login'?"Don't have an account? Register":"Already have an account? Sign in"}</button></div></div>
+}
+function Protected({children}){return getSession()?children:<Navigate to="/login" replace/>}
+
+function Layout({children}){
+  const session=getSession(); const isAdmin=session?.user?.role==='Administrator'||session?.role==='Administrator';
+  const items = [
+    ['Dashboard','/'],['PAIMANA · 1,981','/paimana'],['Map & Conflict','/route'],['Projects','/projects'],['Predictive Analytics','/predictive'],['EVM','/evm'],['Risk Assessment','/risk'],['Dependencies','/dependencies'],['Drone / Imagery','/imagery'],['Reports','/reports'],['Alerts','/alerts']
+  ];
+  return <div className="app"><aside className="sidebar"><div className="brand"><div className="brand-mark">◆</div><div>Infra Risk Radar</div></div><nav>{items.map(([label,path])=><NavLink key={path} to={path} className={({isActive})=>isActive?'active':''}>{label}</NavLink>)}</nav><div className="sidebar-quick-actions"><NavLink className={({isActive})=>isActive?'quick-link active':'quick-link'} to="/add">＋ Add New Project</NavLink><NavLink className={({isActive})=>isActive?'quick-link ai active':'quick-link ai'} to="/assistant">✦ AI Assistance</NavLink></div><div className="admin"><span>{isAdmin?'Administrator':'General User'}</span><button className="logout-mini" onClick={logout}>Logout</button></div></aside><main className="main"><header className="topbar"><div className="mobile-title">Infra Risk Radar</div><div className="topbar-actions"><div className="date-pill">Sep 2026</div><div className="paimana-pill">PAIMANA · 1,981 · Apr 2026</div><span className="role-pill">{isAdmin?'Administrator':'General User'}</span><button className="icon-btn">🔔</button><button className="logout-top" onClick={logout}>Logout</button></div></header><div className="content">{children}</div></main></div>
+}
+function SectionTitle({title,sub}){return <div className="page-title"><div><h1>{title}</h1>{sub&&<p>{sub}</p>}</div></div>}
+function Stat({label,value,type}){return <div className={'stat '+type}><div className="stat-icon">{type==='total'?'▣':type==='high'?'⚠':type==='medium'?'◐':'●'}</div><div><small>{label}</small><strong>{value}</strong></div></div>}
+function RiskBadge({value}){return <span className={'badge '+riskClass(value)}>{value}</span>}
+
+function IndiaRiskMap({projects}){
+  const [geo,setGeo]=useState(null);
+  useEffect(()=>{
+    let live=true;
+    fetch('https://raw.githubusercontent.com/geohacker/india/master/state/india_state.geojson')
+      .then(r=>r.ok?r.json():Promise.reject(new Error('India boundary unavailable')))
+      .then(g=>{if(live)setGeo(g)}).catch(()=>{if(live)setGeo(null)});
+    return()=>{live=false};
+  },[]);
+  const stateStats=useMemo(()=>{
+    const map={};
+    (projects||[]).forEach(p=>{
+      const state=String(p.state||'').trim(); if(!state)return;
+      if(!map[state])map[state]={total:0,high:0,medium:0,low:0};
+      map[state].total++;
+      const r=String(p.risk||'').toLowerCase();
+      if(r==='high')map[state].high++; else if(r==='medium')map[state].medium++; else map[state].low++;
+    });
+    return map;
+  },[projects]);
+  const keyState=name=>{
+    const n=String(name||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+    const aliases={
+      andamanandnicobarislands:'Andaman and Nicobar Islands',andhrapradesh:'Andhra Pradesh',
+      arunachalpradesh:'Arunachal Pradesh',assam:'Assam',bihar:'Bihar',chhattisgarh:'Chhattisgarh',
+      goa:'Goa',gujarat:'Gujarat',haryana:'Haryana',himachalpradesh:'Himachal Pradesh',
+      jharkhand:'Jharkhand',karnataka:'Karnataka',kerala:'Kerala',madhyapradesh:'Madhya Pradesh',
+      maharashtra:'Maharashtra',manipur:'Manipur',meghalaya:'Meghalaya',mizoram:'Mizoram',
+      nagaland:'Nagaland',odisha:'Odisha',punjab:'Punjab',rajasthan:'Rajasthan',sikkim:'Sikkim',
+      tamilnadu:'Tamil Nadu',telangana:'Telangana',tripura:'Tripura',uttarpradesh:'Uttar Pradesh',
+      uttarakhand:'Uttarakhand',westbengal:'West Bengal',delhi:'Delhi',puducherry:'Puducherry',
+      jammuandkashmir:'Jammu and Kashmir',ladakh:'Ladakh'
+    };
+    return aliases[n]||name;
+  };
+  const styleFeature=feature=>{
+    const props=feature?.properties||{};
+    const name=props.NAME_1||props.ST_NM||props.name||props.NAME||'';
+    const st=stateStats[keyState(name)]||{total:0,high:0,medium:0,low:0};
+    const risk=st.high>=Math.max(1,st.medium)?'high':st.medium?'medium':'low';
+    return {color:'#6b8bb4',weight:1,fillColor:risk==='high'?'#ef3340':risk==='medium'?'#f4a300':'#16a765',fillOpacity:st.total?0.38:0.12};
+  };
+  return <div className="map-card">
+    <div className="card-head"><h3>PAIMANA Project Risk Map</h3><span className="muted">State-level portfolio risk · {projects?.length||0} records</span></div>
+    <div className="map-wrap">
+      <MapContainer center={[22.8,79.2]} zoom={4.6} scrollWheelZoom={true} style={{height:'100%',width:'100%'}}>
+        <TileLayer attribution="© OpenStreetMap contributors" url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"/>
+        {geo && <GeoJSON data={geo} style={styleFeature} onEachFeature={(feature,layer)=>{
+          const props=feature?.properties||{}; const name=props.NAME_1||props.ST_NM||props.name||props.NAME||'State';
+          const st=stateStats[keyState(name)]||{total:0,high:0,medium:0,low:0};
+          layer.bindPopup(`<b>${name}</b><br/>PAIMANA records: <b>${st.total}</b><br/>High: ${st.high} · Medium: ${st.medium} · Low: ${st.low}`);
+        }}/> }
+      </MapContainer>
+    </div>
+    <div className="legend"><span><i className="dot high"></i>High concentration</span><span><i className="dot medium"></i>Medium concentration</span><span><i className="dot low"></i>Lower concentration</span></div>
+    <p className="method-note">PAIMANA April 2026 provides project-level monitoring data but not universal GPS geometry. This map therefore aggregates risk at state level; the Map & Conflict page uses route geometry for project matching.</p>
+  </div>
+}
+
+function PaimanaOverview(){
+ const [o,setO]=useState(paimanaOverview); const [loading,setLoading]=useState(true); const [error,setError]=useState('');
+ useEffect(()=>{let live=true;fetch(`${API}/paimana-overview`).then(r=>{if(!r.ok)throw new Error('PAIMANA data unavailable');return r.json()}).then(d=>{if(live)setO({...paimanaOverview,...d})}).catch(e=>{if(live)setError(e.message)}).finally(()=>{if(live)setLoading(false)});return()=>{live=false}},[]);
+ const overrunLakhCr=Math.round((Number(o.revisedCostLakhCr)-Number(o.originalCostLakhCr))*100)/100;
+ const overrunPct=Math.round((overrunLakhCr/Number(o.originalCostLakhCr))*1000)/10;
+ const expenditurePct=Math.round((Number(o.expenditureLakhCr)/Number(o.revisedCostLakhCr))*1000)/10;
+ return <Layout><SectionTitle title="PAIMANA — April 2026" sub="Official MoSPI / IPMD national portfolio snapshot for Central Sector Infrastructure Projects worth ₹150 crore and above"/>
+  {loading&&<div className="form-note">Loading PAIMANA data…</div>}{error&&<div className="form-note error">{error} Showing the configured April 2026 official snapshot.</div>}
+  <div className="paimana-hero">
+    <div><span className="paimana-kicker">OFFICIAL PAIMANA PORTFOLIO</span><strong>1,981</strong><span>ongoing infrastructure projects</span></div>
+    <div className="paimana-hero-meta"><b>April 2026</b><span>17 Central Ministries / Departments</span><span>Revised cost ₹42.78 lakh crore</span><span>Expenditure ₹20.36 lakh crore</span></div>
+  </div>
+  <div className="card"><p className="method-note" style={{marginTop:0}}>PAIMANA is the national monitoring platform for Central Sector infrastructure projects. The <b>1,981</b> figure is the official April 2026 national portfolio total. The application's interactive route registry remains a separate detailed GIS layer and does not pretend that every national portfolio record has route-ready geometry.</p></div>
+  <div className="stats">
+    <Stat label="PAIMANA Projects" value={Number(o.totalProjects).toLocaleString()} type="total"/>
+    <Stat label="Central Ministries / Depts" value={o.ministries} type="medium"/>
+    <Stat label="Revised Cost" value={'₹ '+o.revisedCostLakhCr+' L Cr'} type="low"/>
+    <Stat label="Cumulative Expenditure" value={'₹ '+o.expenditureLakhCr+' L Cr'} type="high"/>
+  </div>
+  <div className="grid2">
+    <div className="card"><h3>Official Sector-wise Portfolio — 1,981 Projects</h3><ResponsiveContainer width="100%" height={300}><BarChart data={paimanaSectorData} layout="vertical" margin={{left:10,right:20}}><CartesianGrid strokeDasharray="3 3"/><XAxis type="number"/><YAxis dataKey="name" type="category" width={125} tick={{fontSize:10}}/><Tooltip/><Bar dataKey="projects" fill="#2478e8" radius={[0,6,6,0]}/></BarChart></ResponsiveContainer></div>
+    <div className="card"><h3>Official Ministry / Department Counts</h3><ResponsiveContainer width="100%" height={300}><BarChart data={paimanaMinistryData} margin={{left:10,right:15,bottom:45}}><CartesianGrid strokeDasharray="3 3"/><XAxis dataKey="name" angle={-45} textAnchor="end" interval={0} height={100} tick={{fontSize:8}}/><YAxis/><Tooltip/><Bar dataKey="projects" fill="#16a765" radius={[6,6,0,0]}/></BarChart></ResponsiveContainer></div>
+  </div>
+  <div className="grid2">
+    <div className="card"><h3>Portfolio Cost Position (₹ Lakh Crore)</h3>
+      <div className="metric-box"><span>Original (Approved) Cost</span><b>₹ {o.originalCostLakhCr} L Cr</b></div>
+      <div className="metric-box"><span>Revised Cost</span><b>₹ {o.revisedCostLakhCr} L Cr</b></div>
+      <div className="metric-box"><span>Cumulative Expenditure</span><b>₹ {o.expenditureLakhCr} L Cr ({expenditurePct}% of revised cost)</b></div>
+      <div className="metric-box"><span>Net Cost Escalation</span><b>₹ {overrunLakhCr} L Cr ({overrunPct}%)</b></div>
+    </div>
+    <div className="card"><h3>April 2026 Portfolio Milestones</h3><ul className="decision-list"><li><b>814</b> Mega projects (₹1,000 crore and above)</li><li><b>1,167</b> Major projects (₹150 crore to below ₹1,000 crore)</li><li><b>9</b> projects commissioned during April 2026</li><li><b>55</b> additional projects brought under PAIMANA monitoring</li><li><b>801</b> projects achieved more than 80% physical progress</li></ul></div>
+  </div>
+  <SectionTitle title="Analytics readiness" sub="Only validated models trained on historical project records should be presented as prediction accuracy."/>
+  <div className="card"><p className="method-note">This build does not display fabricated ML accuracy figures. Risk results are calculated from available project evidence. A validated ML score should only be shown after training and testing on a documented historical dataset.</p></div>
+  <SectionTitle title="Common Upload Form (CUF) vs Additional Variables" sub="Existing monitoring fields and proposed predictive variables"/>
+  <div className="grid2">
+    <div className="card"><h3>CUF fields used in the baseline model</h3><div className="table-scroll"><table><thead><tr><th>Field</th><th>Status</th></tr></thead><tbody>{cufFields.map(f=><tr key={f.field}><td>{f.field}</td><td><span className="badge low">In CUF · used</span></td></tr>)}</tbody></table></div></div>
+    <div className="card"><h3>Proposed additional variables</h3><div className="table-scroll"><table><thead><tr><th>Field</th><th>Status</th></tr></thead><tbody>{additionalVariables.map(f=><tr key={f}><td>{f}</td><td><span className="badge high">Not captured</span></td></tr>)}</tbody></table></div></div>
+  </div>
+  <div className="source-strip"><b>Official April 2026 source:</b> MoSPI / Press Information Bureau Flash Report · PAIMANA portfolio total <b>1,981</b> · report published 25 May 2026.</div>
+ </Layout>
+}
+function Dashboard(){
+ const [projects]=useProjects(); const [alerts]=useAlerts();
+ const high=projects.filter(p=>p.risk==='High').length, medium=projects.filter(p=>p.risk==='Medium').length, low=projects.filter(p=>p.risk==='Low').length;
+ const total=projects.length; const sectorData=[...new Set(projects.map(p=>p.sector).filter(Boolean))].map(name=>({name,value:projects.filter(p=>p.sector===name).length}));
+ return <Layout><SectionTitle title="Dashboard" sub="Live view of records currently available to Infra Risk Radar"/>
+  <div className="paimana-dashboard-banner"><div><span>PAIMANA · APRIL 2026</span><strong>1,981</strong><small>official national infrastructure projects</small></div><div><b>₹42.78 L Cr</b><span>revised cost</span></div><div><b>₹20.36 L Cr</b><span>cumulative expenditure</span></div><Link className="view-btn" to="/paimana">Open PAIMANA →</Link></div>
+  <div className="stats"><Stat label="Detailed Registry" value={total} type="total"/><Stat label="High Risk" value={high} type="high"/><Stat label="Medium Risk" value={medium} type="medium"/><Stat label="Low Risk" value={low} type="low"/></div>
+  <div className="card"><span>{total?`The detailed registry contains ${total} route-ready records. Risk and analytics below are calculated from those detailed records; the national PAIMANA portfolio is 1,981.`:'No detailed project records are currently available. The official April 2026 PAIMANA portfolio remains 1,981 projects.'}</span></div>
+  <div className="grid2"><div className="card chart-card"><div className="card-head"><h3>Risk Overview</h3></div>{total?<div className="donut-row"><div className="donut"><PieChart width={210} height={210}><Pie data={[{v:high},{v:medium},{v:low}]} innerRadius={62} outerRadius={82} dataKey="v"><Cell fill="#ef3340"/><Cell fill="#f4a300"/><Cell fill="#16a765"/></Pie></PieChart><div className="donut-label"><b>{total}</b><span>Projects</span></div></div><div className="risk-list"><div><i className="dot high"/>High Risk <b>{high}</b></div><div><i className="dot medium"/>Medium Risk <b>{medium}</b></div><div><i className="dot low"/>Low Risk <b>{low}</b></div></div></div>:<p className="muted">No project data available for risk distribution.</p>}</div>
+   <div className="card chart-card"><div className="card-head"><h3>Sector-wise Projects</h3></div>{sectorData.length?<ResponsiveContainer width="100%" height={220}><BarChart data={sectorData} layout="vertical" margin={{left:15,right:15}}><XAxis type="number" hide/><YAxis dataKey="name" type="category" width={110} tick={{fontSize:12}}/><Tooltip/><Bar dataKey="value" fill="#2478e8" radius={[0,6,6,0]}/></BarChart></ResponsiveContainer>:<p className="muted">No sector data available.</p>}</div></div>
+  <div className="grid2 lower"><div className="card"><div className="card-head"><h3>Recent Alerts</h3><Link to="/alerts">View All</Link></div>{alerts.length?alerts.slice(0,3).map(a=><div className="alert-row" key={a.id}><span className={'alert-dot '+riskClass(a.level)}>!</span><div><b>{a.project}</b><p>{a.message}</p></div><small>{new Date(a.time).toLocaleString()}</small></div>):<p className="muted">No active data-driven alerts.</p>}</div><IndiaRiskMap projects={projects}/></div>
+ </Layout>
+}
+function Projects(){
+  const [projects,setProjects] = useProjects(); const [q,setQ]=useState(''); const [sector,setSector]=useState('All'); const [risk,setRisk]=useState('All'); const [page,setPage]=useState(1);
+  const isAdmin=getSession()?.user?.role==='Administrator'||getSession()?.role==='Administrator';
+  const filtered=projects.filter(p=>(p.name+p.ministry+p.state).toLowerCase().includes(q.toLowerCase())&&(sector==='All'||p.sector===sector)&&(risk==='All'||p.risk===risk));
+  const pageData=filtered.slice((page-1)*6,page*6);
+  const exportCSV=()=>{const rows=[['ID','Project Name','Ministry','Sector','State','Risk','Progress'],...filtered.map(p=>[p.id,p.name,p.ministry,p.sector,p.state,p.risk,p.progress+'%'])];const blob=new Blob([rows.map(r=>r.join(',')).join('\n')],{type:'text/csv'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='infra-projects.csv';a.click();};
+  const deleteProject=async(p)=>{if(!isAdmin){alert('Administrator authentication required.');return}if(!(await reauthenticateAdmin()))return;if(!confirm(`⚠️ Are you sure you want to delete ${p.name}?`))return;const r=await fetch(`${API}/projects/${encodeURIComponent(p.id)}`,{method:'DELETE',headers:authHeaders()});const d=await r.json();if(!r.ok){alert(d.error||'Delete failed');return}setProjects(xs=>xs.filter(x=>x.id!==p.id));alert('✅ Project deleted successfully.');};
+  return <Layout><SectionTitle title="Projects Register" sub="PAIMANA April 2026: 1,981 national projects · detailed route-ready records shown below."/>
+    <div className="card"><div className="stats"><Stat label="PAIMANA Portfolio" value={paimanaOverview.totalProjects.toLocaleString()} type="total"/><Stat label="Loaded Detailed Records" value={projects.length} type="medium"/></div><p className="method-note">April 2026 PAIMANA national portfolio: 1,981 projects. The table below shows the detailed route-ready records currently loaded in this application.</p></div>
+    <div className="card"><div className="toolbar"><input value={q} onChange={e=>{setQ(e.target.value);setPage(1)}} placeholder="⌕  Search by project name, ministry, state..."/><select value={sector} onChange={e=>setSector(e.target.value)}><option>All</option>{[...new Set(projects.map(p=>p.sector))].filter(Boolean).map(x=><option key={x}>{x}</option>)}</select><select value={risk} onChange={e=>setRisk(e.target.value)}><option>All</option><option>High</option><option>Medium</option><option>Low</option></select><button className="primary" onClick={exportCSV}>⇩ Export</button></div>
+      <div className="table-scroll"><table><thead><tr><th>ID</th><th>Project Name</th><th>Ministry</th><th>Sector</th><th>State</th><th>Risk</th><th>Progress</th><th>Actions</th></tr></thead><tbody>{pageData.map(p=><tr key={p.id}><td>{p.id}</td><td><b>{p.name}</b></td><td>{p.ministry}</td><td>{p.sector}</td><td>{p.state}</td><td><RiskBadge value={p.risk}/></td><td><span className="progress-pill">{p.progress??'—'}%</span></td><td><div className="project-register-actions"><Link className="view-btn" to={'/projects/'+p.id}>👁️ View</Link>{isAdmin?<><Link className="view-btn admin-action" to={'/projects/'+p.id+'?edit=1'}>Edit</Link><button className="view-btn admin-action danger-action" onClick={()=>deleteProject(p)}>Delete</button></>:<span className="locked-action">Admin only</span>}</div></td></tr>)}</tbody></table></div>
+      <div className="pagination"><button onClick={()=>setPage(Math.max(1,page-1))}>‹</button><span>Page {page}</span><button onClick={()=>setPage(page+1)} disabled={page*6>=filtered.length}>›</button><span>Total {filtered.length} projects</span></div>
+    </div>
+  </Layout>
+}
+
+const IMAGE_BY_SECTOR={
+  Transport:'/project-images/transport.svg',
+  Energy:'/project-images/energy.svg',
+  Water:'/project-images/water.svg',
+  Communication:'/project-images/communication.svg',
+  'Social Infra':'/project-images/social.svg',
+  'Water Pipeline':'/project-images/water.svg',
+  Electricity:'/project-images/electricity.svg',
+  Metro:'/project-images/metro.svg',
+  Road:'/project-images/road.svg',
+  Railway:'/project-images/railway.svg',
+  Drainage:'/project-images/water.svg',
+  Others:'/project-images/other.svg'
+};
+function projectImage(p){return p?.imageUrl||IMAGE_BY_SECTOR[p?.sector]||'/project-images/other.svg'}
+function ProjectDetail(){
+  const {id}=useParams(); const [projects,setProjects]=useProjects(); const p=projects.find(x=>x.id===id); const [tab,setTab]=useState('Overview'); const [editing,setEditing]=useState(false);
+  const isAdmin=getSession()?.user?.role==='Administrator'||getSession()?.role==='Administrator';
+  const [editForm,setEditForm]=useState(null);
+  useEffect(()=>{if(p&&!editForm)setEditForm({status:p.status||'',progress:p.progress??'',cost:p.cost??'',expenditure:p.expenditure??'',start:p.start||p.startDate||'',completion:p.completion||p.revisedCompletion||p.targetCompletion||'')},[p,editForm]);
+  useEffect(()=>{if(isAdmin&&new URLSearchParams(window.location.search).get('edit')==='1')setEditing(true)},[isAdmin]);
+  const saveEdit=async()=>{if(!isAdmin){alert('Administrator authentication required.');return}if(!(await reauthenticateAdmin()))return;const r=await fetch(`${API}/projects/${encodeURIComponent(id)}`,{method:'PATCH',headers:authHeaders({'Content-Type':'application/json'}),body:JSON.stringify({...editForm,progress:editForm.progress===''?null:Number(editForm.progress),cost:Number(editForm.cost||0),expenditure:Number(editForm.expenditure||0)})});const d=await r.json();if(!r.ok){alert(d.error||'Update failed');return}setProjects(xs=>xs.map(x=>x.id===id?d:x));setEditing(false);alert('✅ Project updated successfully.');};
+  const m=p?modelForProject(p):null;
+  const riskData=m?[{subject:'Cost',project:m.costRisk,sector:52,national:42},{subject:'Delay',project:m.scheduleRisk,sector:55,national:45},{subject:'Resource',project:Math.min(100,Math.round((100-m.progress)*.7)),sector:50,national:48},{subject:'Contract',project:p.status==='Delayed'?72:45,sector:55,national:50},{subject:'Environmental',project:p.risk==='High'?65:45,sector:48,national:40},{subject:'Land',project:p.progress<60?68:38,sector:50,national:44}]:[];
+  if(!p) return <Layout><div className="breadcrumb">← <Link to="/projects">Projects</Link></div><div className="card"><h2>Project not found</h2><p className="muted">The selected project is not present in the currently loaded project registry. Return to Projects and select an available record.</p><Link className="primary view-btn" to="/projects">Back to Projects</Link></div></Layout>; return <Layout><div className="breadcrumb">← <Link to="/projects">Projects</Link> › {p.id}</div><div className="project-head"><div className="avatar">◉</div><div><h1>{p.name}</h1><div className="chips"><span>{p.ministry||'Ministry not available'}</span><span>{p.sector||'Sector not available'}</span><span>{p.state||'State not available'}</span></div></div><RiskBadge value={(p.risk||'Not available')+' Risk'}/></div><div className="toolbar right">{isAdmin?<button className="primary" onClick={()=>setEditing(true)}>Edit Project</button>:<span className="locked-action">Administrator authentication required</span>}</div>
+    {editing&&<div className="card edit-panel"><h3>Administrator-authenticated edit</h3><div className="form-grid"><Field label="Project Status"><select value={editForm?.status||''} onChange={e=>setEditForm({...editForm,status:e.target.value})}><option>New</option><option>Ongoing</option><option>At Risk</option><option>Delayed</option><option>Completed</option></select></Field><Field label="Physical Progress (%)"><input type="number" min="0" max="100" value={editForm?.progress??''} onChange={e=>setEditForm({...editForm,progress:e.target.value})}/></Field><Field label="Revised Cost"><input type="number" value={editForm?.cost??''} onChange={e=>setEditForm({...editForm,cost:e.target.value})}/></Field><Field label="Expenditure"><input type="number" value={editForm?.expenditure??''} onChange={e=>setEditForm({...editForm,expenditure:e.target.value})}/></Field><Field label="Start Date"><input type="date" value={editForm?.start||''} onChange={e=>setEditForm({...editForm,start:e.target.value})}/></Field><Field label="Actual/Expected Completion"><input type="date" value={editForm?.completion||''} onChange={e=>setEditForm({...editForm,completion:e.target.value})}/></Field></div><div className="toolbar right"><button className="ghost" onClick={()=>setEditing(false)}>Cancel</button><button className="primary" onClick={saveEdit}>Authenticate & Save</button></div></div>}
+    <div className="card project-hero-image"><img src={projectImage(p)} alt={`${p.name} project imagery`}/><div><h3>Project imagery & information</h3><p>Representative infrastructure imagery is bundled locally for the project sector. It is <b>not</b> presented as satellite/drone evidence of the selected project unless a verified image is uploaded.</p><span className="image-source-note">Imagery status: {p.imageUrl?'Project image supplied':'Representative sector image'}</span></div></div>
+    <div className="tabs">{['Overview','Progress','Financials','Milestones','Risk Analysis'].map(x=><button className={tab===x?'active':''} onClick={()=>setTab(x)} key={x}>{x}</button>)}</div>
+    {tab==='Overview'&&<><div className="grid2"><div className="card"><h3>Project Summary</h3><dl><dt>Original Cost</dt><dd>₹ {Number(p.originalCost||0).toLocaleString()} Cr</dd><dt>Revised Cost</dt><dd>₹ {Number(p.cost||p.revisedCost||0).toLocaleString()} Cr <em>({(Number(p.originalCost)>0?Math.round((Number(p.cost||p.revisedCost||0)/Number(p.originalCost)-1)*100):0)}%)</em></dd><dt>Expenditure</dt><dd>₹ {Number(p.expenditure||0).toLocaleString()} Cr</dd><dt>Start Date</dt><dd>{p.start}</dd><dt>Expected Completion</dt><dd>{p.completion}</dd><dt>Current Status</dt><dd className="danger">{p.status}</dd></dl></div><div className="card"><h3>Progress</h3><div className="progress-circles"><div className="circle"><b>{p.progress}%</b><span>Physical</span></div><div className="circle"><b>{Math.max(10,p.progress-4)}%</b><span>Financial</span></div></div></div></div>
+      <div className="card full-info-card"><h3>Complete Project Information</h3><div className="complete-info-grid">{Object.entries(p).filter(([k])=>k!=='imageUrl').map(([k,v])=><div key={k}><small>{k.replace(/([A-Z])/g,' $1').replace(/^./,x=>x.toUpperCase())}</small><b>{v===null||v===undefined||v===''?'Not available':typeof v==='object'?JSON.stringify(v):String(v)}</b></div>)}</div></div>
+      <div className="grid2"><div className="card"><h3>Risk Score</h3><div className="risk-score"><div>{m.score}<small>/ 100</small></div><span>{m.score>=70?'High':m.score>=45?'Medium':'Low'} Risk</span></div></div><div className="card"><h3>Predictions</h3><div className="prediction"><span>Cost Overrun</span><b>{m.predictedOverrun.toFixed(1)}%</b></div><div className="prediction"><span>Delay Probability</span><b>{m.score}%</b></div><div className="prediction"><span>Expected Delay</span><b>{m.delayMonths} months</b></div></div></div></>}
+    {tab==='Progress'&&<div className="card"><h3>Physical & Financial Progress</h3><div className="big-progress"><span>Physical Progress</span><div><i style={{width:p.progress+'%'}}></i></div><b>{p.progress}%</b></div><div className="big-progress"><span>Financial Progress</span><div><i style={{width:Math.max(10,p.progress-4)+'%'}}></i></div><b>{Math.max(10,p.progress-4)}%</b></div></div>}
+    {tab==='Financials'&&<div className="card"><h3>Financial Overview</h3><ResponsiveContainer width="100%" height={320}><LineChart data={trend}><CartesianGrid strokeDasharray="3 3"/><XAxis dataKey="year"/><YAxis/><Tooltip/><Legend/><Line dataKey="original" name="Original Cost" stroke="#1769e0" strokeWidth={3}/><Line dataKey="revised" name="Revised Cost" stroke="#16a765" strokeWidth={3}/></LineChart></ResponsiveContainer></div>}
+    {tab==='Milestones'&&<div className="card"><h3>Milestones</h3>{['Land Acquisition','Environmental Clearance','Bridge Construction','Utility Shifting','Final Construction'].map((m,i)=><div className="timeline-item" key={m}><span className={'timeline-dot '+(i<1?'done':i===4?'delayed':'pending')}></span><div><b>{m}</b><p>{i<1?'Completed':i===4?'Delayed':'In Progress'}</p></div></div>)}</div>}
+    {tab==='Risk Analysis'&&<div className="card"><h3>Project Risk Profile</h3><ResponsiveContainer width="100%" height={420}><RadarChart data={riskData}><PolarGrid/><PolarAngleAxis dataKey="subject"/><PolarRadiusAxis domain={[0,100]}/><Radar name="This Project" dataKey="project" stroke="#ef3340" fill="#ef3340" fillOpacity={.18}/><Radar name="Sector Avg" dataKey="sector" stroke="#2478e8" fill="#2478e8" fillOpacity={.12}/><Radar name="National Avg" dataKey="national" stroke="#16a765" fill="#16a765" fillOpacity={.1}/><Legend/><Tooltip/></RadarChart></ResponsiveContainer></div>}
+  </Layout>
+}
+
+function haversine(a,b){
+  const R=6371, toRad=x=>x*Math.PI/180;
+  const dLat=toRad(b.lat-a.lat), dLon=toRad(b.lng-a.lng);
+  const x=Math.sin(dLat/2)**2+Math.cos(toRad(a.lat))*Math.cos(toRad(b.lat))*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(x));
+}
+function pointToSegmentDistanceKm(p,a,b){
+  const latScale=111.32, lngScale=111.32*Math.cos(((a.lat+b.lat)/2)*Math.PI/180);
+  const px=p.lng*lngScale, py=p.lat*latScale, ax=a.lng*lngScale, ay=a.lat*latScale, bx=b.lng*lngScale, by=b.lat*latScale;
+  const dx=bx-ax, dy=by-ay, len2=dx*dx+dy*dy;
+  const t=len2?Math.max(0,Math.min(1,((px-ax)*dx+(py-ay)*dy)/len2)):0;
+  const cx=ax+t*dx, cy=ay+t*dy;
+  return Math.hypot(px-cx,py-cy)/111.32;
+}
+function distanceToRouteKm(point,coords){
+  if(!coords?.length)return Infinity;
+  let best=Infinity;
+  for(let i=1;i<coords.length;i++) best=Math.min(best,pointToSegmentDistanceKm(point,coords[i-1],coords[i]));
+  return best;
+}
+function formatDuration(sec){
+  const mins=Math.round(sec/60); const h=Math.floor(mins/60), m=mins%60;
+  return h?`${h} hr ${m} mins`:`${m} mins`;
+}
+function routeRisk(distance,projectRisk){
+  if(projectRisk==='High' || distance<0.6)return 'High';
+  if(projectRisk==='Medium' || distance<1.2)return 'Medium';
+  return 'Low';
+}
+function RouteViewport({route}){
+  const map=useMap();
+  useEffect(()=>{
+    if(route?.coords?.length){
+      const bounds=route.coords.map(([lat,lng])=>[lat,lng]);
+      map.fitBounds(bounds,{padding:[28,28],maxZoom:13});
+    }
+  },[map,route]);
+  return null;
+}
+function RouteMap({route,conflicts,alternatives,from,to,selectedKey,onSelectRoute,onSelectProject,layers}){
+  const center=route?.coords?.length ? route.coords[Math.floor(route.coords.length/2)] : [20.5937,78.9629];
+  const selected=selectedKey||'A';
+  const visible=(conflicts||[]).filter(p=>{
+    if(String(p.status||'').toLowerCase().includes('planned')) return layers?.planned;
+    if(!layers?.ongoing) return false;
+    const t=(p.type||'').toLowerCase();
+    if(t.includes('rail'))return layers?.railways;
+    if(t.includes('water')||t.includes('pipeline'))return layers?.water;
+    if(t.includes('electric')||t.includes('power'))return layers?.electricity;
+    if(t.includes('metro'))return layers?.metro;
+    return layers?.roads;
+  });
+  const [satellite,setSatellite]=useState(false);
+  const iconFor=p=>{
+    const t=(p.type||'').toLowerCase();
+    if(t.includes('bridge')) return '⚑';
+    if(t.includes('rail')) return '▰';
+    if(t.includes('water')||t.includes('pipeline')) return '≋';
+    if(t.includes('electric')||t.includes('power')) return 'ϟ';
+    return '▲';
+  };
+  return <MapContainer key={selectedKey+'-'+(route?.fromName||'')+'-'+(route?.toName||'')} center={center} zoom={8} scrollWheelZoom style={{height:'100%',width:'100%'}}>
+    <RouteViewport route={route}/>
+    <TileLayer attribution={satellite?'Tiles © Esri':'© OpenStreetMap contributors'} url={satellite?'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}':'https://tile.openstreetmap.org/{z}/{x}/{y}.png'}/>
+    {alternatives?.map((a,i)=><Polyline key={'alt'+i} positions={a.coords} pathOptions={{color:a.key===selected?'#0868f7':'#8491a2',weight:a.key===selected?5:3,dashArray:a.key===selected?undefined:'7 8',opacity:a.key===selected?.96:.55}} eventHandlers={{click:()=>onSelectRoute?.(a.key)}}/>)}
+    {from && <Marker position={from}><Popup><b>A — {route?.fromName}</b><br/>{route?.from?.label}<br/><b>District:</b> {route?.from?.district||'Not available'}<br/><b>State:</b> {route?.from?.state||'Not available'}</Popup></Marker>}
+    {to && <Marker position={to}><Popup><b>B — {route?.toName}</b><br/>{route?.to?.label}<br/><b>District:</b> {route?.to?.district||'Not available'}<br/><b>State:</b> {route?.to?.state||'Not available'}</Popup></Marker>}
+    {visible.filter(p=>p.geometry).map(p=><GeoJSON key={'geometry-'+p.id} data={{type:'Feature',geometry:p.geometry,properties:{name:p.name}}} style={{color:String(p.risk||'').toLowerCase()==='high'?'#ef3340':'#1476e4',weight:4,opacity:.78}} onEachFeature={(feature,layer)=>layer.bindPopup(`<b>${p.name}</b><br/>${p.type||'Infrastructure'} · ${p.status||'Status not available'}<br/>Distance from route: <b>${Number(p.distance).toFixed(2)} km</b>`)} />)}
+    {visible.map(p=>{
+      const high=String(p.risk||'').toLowerCase()==='high';
+      const type=(p.type||'').toLowerCase();
+      const supplementary=p.sourceClass==='mapped';
+      const demo=p?.isDemo===true||p?.sourceClass==='route-demo';
+      const cls=demo?'demo':supplementary?'mapped':high?'high':type.includes('rail')?'rail':type.includes('water')?'water':'road';
+      const markerSymbol=demo?'✦':supplementary?'◇':iconFor(p);
+      const html=`<div class="map-project-pin ${cls}"><span>${markerSymbol}</span></div>`;
+      const icon=L.divIcon({className:'map-project-icon-wrap',html,iconSize:[34,42],iconAnchor:[17,40]});
+      return <Marker key={'project-'+p.id} position={[p.lat,p.lng]} icon={icon} eventHandlers={{click:()=>onSelectProject?.(p)}}>
+        <Popup><b>{p.name}</b><br/>{p.type||'Infrastructure'} · {p.status||'Status not available'}<br/>Source: <b>{p.sourceType||'Not available'}</b><br/>Verification: <b>{p.sourceClass==='mapped'?'Mapped Construction – Verification Required':p.sourceClass==='paimana-location-candidate'?'PAIMANA Candidate – Verification Required':p.isDemo===true||p.sourceClass==='route-demo'?'DEMO / SIMULATED – not a real project':p.sourceVerified?'Verified source':'Verification Required'}</b><br/>Distance from route: <b>{Number(p.distance).toFixed(2)} km</b><br/>Progress: <b>{p.progress===null||p.progress===undefined?'Not available':`${p.progress}%`}</b></Popup>
+      </Marker>;
+    })}
+    <div className="map-type-legend">
+      <b>Project Type (Marker)</b>
+      <span><i className="marker-key road">▲</i>Road / Highway</span>
+      <span><i className="marker-key high">⚑</i>Bridge</span>
+      <span><i className="marker-key water">≋</i>Water / Pipeline</span>
+      <span><i className="marker-key rail">▰</i>Railway</span>
+      <span><i className="marker-key other">●</i>Other</span><span><i className="marker-key mapped">◇</i>OSM mapped · unverified</span>
+    </div>
+    <div className="map-layer-toggle"><button className={!satellite?'active':''} onClick={()=>setSatellite(false)}>Map</button><button className={satellite?'active':''} onClick={()=>setSatellite(true)}>Satellite</button></div>
+    <div className="map-scale-note">Route corridor: <b>2 km each side</b></div>
+  </MapContainer>
+}
+function ProjectAnalysisOverlay({project,onClose}){
+  const progress=Number.isFinite(Number(project.progress)) ? Number(project.progress) : null;
+  const original=Number.isFinite(Number(project.originalCost)) ? Number(project.originalCost) : null;
+  const revised=Number.isFinite(Number(project.cost)) ? Number(project.cost) : null;
+  const expenditure=Number.isFinite(Number(project.expenditure)) ? Number(project.expenditure) : null;
+  const costOverrun=original && revised ? Math.max(0,((revised-original)/original)*100) : null;
+  return <div className="project-analysis-overlay">
+    <div className="project-analysis-head"><div><span className="eyebrow">PROJECT ANALYSIS</span><h3>{project.name}</h3><p>{project.type} · {project.status}</p></div><button className="close-analysis" onClick={onClose}>×</button></div>
+    <div className="analysis-source"><b>Data source:</b> {project.sourceClass==='demo-verified-government-gis'?'Government GIS':project.sourceClass==='official-state-gis'?'Official State GIS':project.sourceVerified?'Verified Government GIS':'OpenStreetMap Mapped Construction'} · <b>Location match:</b> {Number(project.distance).toFixed(2)} km from selected route · <span>{project.sourceType||'registered project coordinate'}</span></div>
+    <div className="analysis-grid">
+      <div><small>Physical Progress</small><strong>{progress===null?'Not available':`${progress}%`}</strong></div>
+      <div><small>Original Cost</small><strong>{original===null?'Not available':`₹${original.toLocaleString()} Cr`}</strong></div>
+      <div><small>Revised / Current Cost</small><strong>{revised===null?'Not available':`₹${revised.toLocaleString()} Cr`}</strong></div>
+      <div><small>Expenditure</small><strong>{expenditure===null?'Not available':`₹${expenditure.toLocaleString()} Cr`}</strong></div>
+    </div>
+    <div className="analysis-section"><h4>Risk & Prediction</h4><div className="analysis-risk-row"><span className={`analysis-risk-badge ${(project.risk||'').toLowerCase()}`}>{project.risk||'Not available'}</span><span>{project.risk ? 'Risk classification from the registered project record.' : 'No risk classification available.'}</span></div>
+      <div className="analysis-predictions"><div><small>Cost Overrun</small><b>{costOverrun===null?'Not available':`${costOverrun.toFixed(1)}%`}</b></div><div><small>Delay Probability</small><b>Not available</b></div><div><small>Expected Delay</small><b>Not available</b></div></div>
+      <p className="method-note">Predictions are intentionally not fabricated. Connect the trained SIH26103 ML model and historical project records to populate predictive values.</p>
+    </div>
+    <div className="analysis-section"><h4>Route Impact</h4><p>This project is inside the configured 2 km route corridor. Projects at or below 0.5 km are treated as <b>on / overlapping the route</b>; others are treated as <b>near route</b>.</p><div className="analysis-action">⚠ Coordinate this project with other works before finalizing the corridor.</div></div>
+  </div>
+}
+
+function LocationBox({label,value,setValue,selected,setSelected,placeholder}){
+  const [suggestions,setSuggestions]=useState([]); const [open,setOpen]=useState(false); const [busy,setBusy]=useState(false);
+  useEffect(()=>{
+    const q=value.trim();
+    if(q.length<3){setSuggestions([]);setBusy(false);return;}
+    const controller=new AbortController();
+    const timer=setTimeout(async()=>{setBusy(true);try{const r=await fetch(`${API}/geocode?q=${encodeURIComponent(q)}`,{headers:{Accept:'application/json'},signal:controller.signal});const d=await r.json();if(r.ok)setSuggestions(d.results||[]);}catch(e){if(e.name!=='AbortError')setSuggestions([]);}finally{if(!controller.signal.aborted)setBusy(false)}},220);
+    return ()=>{clearTimeout(timer);controller.abort()};
+  },[value]);
+  return <label className="route-location-box"><span>{label}</span><div className="route-input-shell">⌖<input value={value} onFocus={()=>setOpen(true)} onChange={e=>{setValue(e.target.value);setSelected(null);setOpen(true)}} onBlur={()=>setTimeout(()=>setOpen(false),180)} placeholder={placeholder}/>{busy&&<small className="location-searching">…</small>}</div>
+    {open&&suggestions.length>0&&<div className="location-suggestions">{suggestions.slice(0,6).map((x,i)=><button type="button" key={`${x.osmType}-${x.placeId}-${i}`} onMouseDown={e=>e.preventDefault()} onClick={()=>{setValue(x.name||x.locality||x.label);setSelected(x);setOpen(false)}}><b>{x.name||x.locality}</b><span>{[x.district,x.state].filter(Boolean).join(', ')||x.label}</span><small>{x.placeType||x.class||'place'} · {Number(x.lat).toFixed(5)}, {Number(x.lng).toFixed(5)}</small></button>)}</div>}
+  </label>
+}
+
+function RouteAnalysis(){
+  const [fromName,setFromName]=useState('Hyderabad');
+  const [toName,setToName]=useState('Vijayawada');
+  const [fromPlace,setFromPlace]=useState(null);
+  const [toPlace,setToPlace]=useState(null);
+  const [routeOptions,setRouteOptions]=useState({});
+  const [routeConflicts,setRouteConflicts]=useState({});
+  const [routeMonitoring,setRouteMonitoring]=useState({});
+  const [selectedKey,setSelectedKey]=useState('A');
+  const [loading,setLoading]=useState(false);
+  const [error,setError]=useState('');
+  const [layers,setLayers]=useState({roads:true,railways:true,water:true,electricity:true,metro:true,ongoing:true,planned:false});
+  const [selectedProject,setSelectedProject]=useState(null);
+  const [coverage,setCoverage]=useState(null);
+  const [sourceStatus,setSourceStatus]=useState(null);
+  const [detailTab,setDetailTab]=useState('Overview');
+  const routeRequestId=useRef(0);
+
+  const analyze=async()=>{
+    const requestId=++routeRequestId.current;
+    if(!fromName.trim()||!toName.trim()){setError('Enter both From and To locations.');return;}
+    setLoading(true);setError('');
+    // Clear the previous route immediately so a failed geocode/routing request
+    // can never leave an old route or old project panel visible.
+    setRouteOptions({});setRouteConflicts({});setRouteMonitoring({});setSelectedProject(null);setCoverage(null);setSourceStatus(null);
+    try{
+      const qs=new URLSearchParams({start:fromName.trim(),end:toName.trim(),radiusKm:'2'});
+      if(fromPlace){qs.set('startLat',fromPlace.lat);qs.set('startLng',fromPlace.lng)}
+      if(toPlace){qs.set('endLat',toPlace.lat);qs.set('endLng',toPlace.lng)}
+      const r=await fetch(`${API}/route-analysis?${qs.toString()}`, {headers:{Accept:'application/json'}});
+      const text=await r.text();
+      let data={};
+      try{ data=JSON.parse(text); }catch{ throw new Error(`Backend response was not JSON. Make sure the backend is running on port 5000.`); }
+      if(!r.ok)throw new Error(data.error||'Unable to analyze route');
+      const opts=data.options||{};
+      const firstRoute=opts.A;
+      // India's road network has no genuine driving route anywhere near 50,000 km; that
+      // threshold let a mis-geocoded pair (e.g. one endpoint resolving outside India)
+      // through as if it were a real result. 6,000 km is already far beyond any real
+      // India road trip, so anything past it means the locations resolved wrong.
+      if(!firstRoute?.coords?.length || !Number.isFinite(Number(firstRoute.distance)) || firstRoute.distance>6000){
+        throw new Error('The routing service returned an implausible route. Try selecting a location from the suggestion dropdown instead of the free-typed name, then Find Route again.');
+      }
+      if(requestId!==routeRequestId.current)return;
+      setRouteOptions(opts);
+      setRouteConflicts(Object.fromEntries(Object.entries(opts).map(([k,v])=>[k,v.projects||[]])));
+      setRouteMonitoring(Object.fromEntries(Object.entries(opts).map(([k,v])=>[k,v.monitoringCandidates||[]])));
+      setSelectedKey('A');
+      const first=(opts.A?.projects||[]).find(p=>/ongoing|under construction|construction started/i.test(String(p.status||''))) || (opts.A?.projects||[]).find(p=>p.sourceClass==='paimana-location-candidate') || null;
+      setSelectedProject(first);
+      setDetailTab('Overview');
+      setCoverage(data.coverage||null);
+      setSourceStatus({available:true, pending:true, errors:[]});
+      // Fetch live ongoing road/bridge/flyover evidence after the route is visible.
+      // This is separate from routing, so public-data delays never block the map.
+      const liveRoute=opts.A;
+      if(liveRoute?.coords?.length){
+        fetch(`${API}/route-live-projects`,{
+          method:'POST',headers:{'Content-Type':'application/json',Accept:'application/json'},
+          body:JSON.stringify({coords:liveRoute.coords,officialRadiusKm:2,supplementaryRadiusKm:5,start:fromName.trim(),end:toName.trim(),roadNames:liveRoute.roadNames||[]})
+        }).then(x=>x.json()).then(live=>{
+          if(requestId!==routeRequestId.current)return;
+          const liveProjects=Array.isArray(live?.projects)?live.projects:[];
+          setRouteOptions(prev=>{
+            if(!prev.A)return prev;
+            const base=Array.isArray(prev.A.projects)?prev.A.projects:[];
+            const byId=new Map();
+            [...base,...liveProjects].forEach(p=>byId.set(String(p.id||`${p.name}|${p.lat}|${p.lng}`),p));
+            const merged=[...byId.values()].sort((a,b)=>{
+              const ad=a?.isDemo===true||a?.sourceClass==='route-demo'?1:0;
+              const bd=b?.isDemo===true||b?.sourceClass==='route-demo'?1:0;
+              return ad-bd || (a.distance??999)-(b.distance??999);
+            });
+            return {...prev,A:{...prev.A,projects:merged,constructionSource:{available:live?.available!==false,pending:false,error:live?.error||null}}};
+          });
+          setRouteMonitoring(prev=>({...prev,A:liveProjects.filter(p=>p?.sourceClass==='paimana-location-candidate')}));
+          setRouteConflicts(prev=>{
+            const base=Array.isArray(opts.A?.projects)?opts.A.projects:[];
+            const byId=new Map();
+            [...base,...liveProjects].forEach(p=>byId.set(String(p.id||`${p.name}|${p.lat}|${p.lng}`),p));
+            const merged=[...byId.values()].sort((a,b)=>{
+              const ad=a?.isDemo===true||a?.sourceClass==='route-demo'?1:0;
+              const bd=b?.isDemo===true||b?.sourceClass==='route-demo'?1:0;
+              return ad-bd || (a.distance??999)-(b.distance??999);
+            });
+            return {...prev,A:merged};
+          });
+          // When live sources discover a real project, select the nearest real record
+          // instead of leaving the user on a simulation card.
+          const preferredReal=liveProjects.filter(p=>p?.isDemo!==true&&p?.sourceClass!=='route-demo'&&p?.sourceClass!=='paimana-location-candidate'&&/ongoing|under construction|construction started/i.test(String(p.status||''))).sort((a,b)=>(a.distance??999)-(b.distance??999))[0];
+          const preferredPaimana=liveProjects.filter(p=>p?.sourceClass==='paimana-location-candidate'&&/ongoing|under construction|construction started/i.test(String(p.status||''))).sort((a,b)=>(a.distance??999)-(b.distance??999))[0];
+          if(preferredReal||preferredPaimana)setSelectedProject(preferredReal||preferredPaimana);
+          // Recalculate the visible route impact after live project results arrive.
+          setRouteOptions(prev=>{
+            if(!prev.A)return prev;
+            const projects=Array.isArray(prev.A.projects)?prev.A.projects:[];
+            const onRoute=projects.filter(p=>p.overlap==='On / overlapping route');
+            const high=onRoute.filter(p=>String(p.risk||'').toLowerCase()==='high').length;
+            const medium=onRoute.filter(p=>String(p.risk||'').toLowerCase()==='medium').length;
+            const level=high>=2?'HIGH':high===1||medium>=2?'MEDIUM':onRoute.length?'LOW':'LOW';
+            return {...prev,A:{...prev.A,impact:{...(prev.A.impact||{}),level,estimatedAdditionalDelayMinutes:onRoute.length?Math.min(60,onRoute.length*5):0}}};
+          });
+          setSourceStatus(live?.available===false
+            ? {available:false,pending:false,errors:[live?.error||'Live project lookup unavailable; route remains valid.']}
+            : {available:true,pending:false,errors:[]});
+        }).catch(err=>{
+          setSourceStatus({available:false,pending:false,errors:[err.message||'Live project lookup unavailable; route remains valid.']});
+        });
+      }
+    }catch(e){
+      setError(e.message||'Unable to analyze route');
+      setRouteOptions({});setRouteConflicts({});setRouteMonitoring({});setSelectedProject(null);setCoverage(null);setSourceStatus(null);
+    }finally{setLoading(false)}
+  };
+  useEffect(()=>{document.body.classList.add('map-route-page'); return ()=>document.body.classList.remove('map-route-page')},[]);
+  useEffect(()=>{analyze()},[]);
+
+  const route=routeOptions[selectedKey]||null;
+  const alternatives=Object.values(routeOptions);
+  // Use the latest live lookup results for the counters. The old UI kept the
+  // initial route-analysis counters, so it could remain at zero after lookup.
+  const liveProjects=route ? (route.projects||[]) : [];
+  const realProjects=liveProjects.filter(p=>p?.isDemo!==true&&p?.sourceClass!=='route-demo');
+  const demoProjectCount=liveProjects.filter(p=>p?.isDemo===true||p?.sourceClass==='route-demo').length;
+  const verifiedOngoingCount=realProjects.filter(p=>p.sourceClass!=='mapped' && p.sourceClass!=='paimana-location-candidate' && /ongoing|under construction|construction started/i.test(String(p.status||''))).length;
+  const mappedUnverifiedCount=realProjects.filter(p=>p.sourceClass==='mapped').length;
+  const paimanaCandidateCount=realProjects.filter(p=>p.sourceClass==='paimana-location-candidate').length;
+  const detectedProjectCount=liveProjects.length;
+  const allProjects=routeConflicts[selectedKey]||[];
+  const monitoringCandidates=routeMonitoring[selectedKey]||[];
+  const filterType=p=>{
+    const t=(p.type||'').toLowerCase();
+    if(t.includes('rail'))return layers.railways;
+    if(t.includes('water')||t.includes('pipeline'))return layers.water;
+    if(t.includes('electric')||t.includes('power'))return layers.electricity;
+    if(t.includes('metro'))return layers.metro;
+    return layers.roads;
+  };
+  const visibleProjects=allProjects.filter(p=>{
+    if(!filterType(p))return false;
+    const planned=String(p.status||'').toLowerCase().includes('planned');
+    return planned?layers.planned:layers.ongoing;
+  });
+  // The route result cards are intentionally limited to ongoing/construction work.
+  // This prevents completed/planned records from being presented as current work.
+  const ongoingRouteProjects=visibleProjects.filter(p=>/ongoing|under construction|construction started/i.test(String(p.status||'')));
+  const exactOngoingProjects=ongoingRouteProjects.filter(p=>p.sourceVerified===true && p.sourceClass!=='paimana-location-candidate' && p.sourceClass!=='mapped');
+  const paimanaOngoingCandidates=ongoingRouteProjects.filter(p=>p.sourceClass==='paimana-location-candidate');
+  const riskEvidenceProjects=visibleProjects.filter(p=>p.sourceClass!=='paimana-location-candidate');
+  const onRoute=riskEvidenceProjects.filter(p=>p.overlap==='On / overlapping route');
+  const nearRoute=riskEvidenceProjects.filter(p=>p.overlap!=='On / overlapping route');
+  const high=onRoute.filter(x=>x.risk==='High').length;
+  const medium=onRoute.filter(x=>x.risk==='Medium').length;
+  const overall=high>=2?'HIGH':high===1||medium>=2?'MEDIUM':onRoute.length?'LOW':'LOW';
+  const verifiedImpact=riskEvidenceProjects.filter(x=>x.costImpactVerified===true&&Number.isFinite(Number(x.costImpact)));
+  const avoidable=verifiedImpact.length?verifiedImpact.reduce((s,p)=>s+Number(p.costImpact),0):null;
+  const toggle=k=>setLayers(x=>({...x,[k]:!x[k]}));
+  const selectRoute=k=>{
+    setSelectedKey(k);
+    const candidates=(routeConflicts[k]||[]).filter(x=>/ongoing|under construction|construction started/i.test(String(x.status||''))); const p=candidates.find(x=>x.overlap==='On / overlapping route') || candidates.find(x=>x.sourceClass!=='mapped'&&x.sourceClass!=='paimana-location-candidate') || candidates[0] || null;
+    setSelectedProject(p);
+    setDetailTab('Overview');
+  };
+  const selectProject=p=>{setSelectedProject(p);setDetailTab('Overview')};
+
+  return <Layout>
+    <SectionTitle title="Map & Conflict" />
+    <div className="reference-route-controls">
+      <LocationBox label="From" value={fromName} setValue={setFromName} selected={fromPlace} setSelected={setFromPlace} placeholder="City, town, village or district" />
+      <button className="reference-swap" onClick={()=>{setFromName(toName);setToName(fromName);setFromPlace(toPlace);setToPlace(fromPlace)}}>⇄</button>
+      <LocationBox label="To" value={toName} setValue={setToName} selected={toPlace} setSelected={setToPlace} placeholder="City, town, village or district" />
+      <button className="primary reference-find" onClick={analyze} disabled={loading}>⌕ &nbsp;{loading?'Finding…':'Find Route'}</button>
+    </div>
+    {error&&<div className="route-error reference-error">⚠ {error}</div>}
+    {route&&<div className="reference-route-status"><span><b>Route</b> {formatDuration(route.duration)} · {route.distance.toFixed(1)} km</span><span><b>From</b> {route.from?.locality||route.fromName}{route.from?.district?`, ${route.from.district}`:''}</span><span><b>To</b> {route.to?.locality||route.toName}{route.to?.district?`, ${route.to.district}`:''}</span><span><b>Infrastructure impact</b> <strong className={'impact-'+String(route.impact?.level||'LOW').toLowerCase()}>{route.impact?.level||'LOW'}</strong></span><span><b>Projects displayed</b> {detectedProjectCount}{sourceStatus?.pending?' …':''}</span><span><b>Exact route matches</b> {riskEvidenceProjects.filter(p=>p.overlap==='On / overlapping route').length}</span><span><b>Verified ongoing</b> {verifiedOngoingCount}</span><span><b>Mapped construction</b> {mappedUnverifiedCount}</span><span><b>PAIMANA candidates</b> {paimanaCandidateCount}</span><span><b>Estimated added delay</b> +{route.impact?.estimatedAdditionalDelayMinutes||0} min</span><small>Fresh search: complete OSRM route geometry is checked every time. Official/project geometry corridor = 2 km; supplementary OSM construction corridor = 5 km. PAIMANA locality-only matches are candidates and are never claimed as exact route intersections.</small>{route.roadNames?.length&&<small><b>Major mapped roads:</b> {route.roadNames.slice(0,8).join(' · ')}</small>}</div>}
+
+    {route&&alternatives.length>1&&<div className="route-alternatives"><b>Route alternatives</b>{alternatives.map(a=><button key={a.key} className={selectedKey===a.key?'active':''} onClick={()=>selectRoute(a.key)}>{a.key} · {a.distance.toFixed(1)} km · {formatDuration(a.duration)}</button>)}</div>}
+    {route&&<div className="route-source-warning">⚡ Fast route mode: the road route appears first; project-source checks continue in the background and update the results automatically.</div>}
+    {route&&sourceStatus?.pending&&<div className="route-source-warning">Live infrastructure sources are being checked in the background. The road route is already ready.</div>}
+    {route&&<div className="route-source-warning">PAIMANA ongoing records are included as monitoring candidates when their project/location text matches the selected route. Exact route intersections are reserved for verified project GIS geometry; no synthetic project is created.</div>}
+    {route&&sourceStatus?.available===false&&<div className="route-source-warning">Live project lookup could not be reached for this request. The route remains valid; retry the project lookup when the network source is available.</div>}
+    {route&&<div className="route-source-warning">Real source records use geographic matching. OpenStreetMap construction is supplementary and never treated as official government progress. Demo cards are visually labelled and placed on the actual route; they are not real project claims.</div>}
+    {route&&sourceStatus?.pending&&<div className="route-source-warning">Checking live project sources along this route… The route is ready; project counts will update when the source scan finishes.</div>}
+    {route&&sourceStatus&&!sourceStatus.pending&&!sourceStatus.available&&<div className="route-source-warning">Live project-source lookup was unavailable. The route is valid, but no conclusion can be made that the corridor has no ongoing projects.</div>}
+
+    <div className="reference-map-workspace">
+      <section className="reference-left-column">
+        <div className="reference-map-box">
+          <div className="reference-map-canvas">
+            <RouteMap route={route} conflicts={visibleProjects} alternatives={alternatives} from={route?.from} to={route?.to} selectedKey={selectedKey} onSelectRoute={selectRoute} layers={layers} onSelectProject={selectProject}/>
+          </div>
+        </div>
+        <div className="reference-project-strip card">
+          <div className="reference-strip-title"><h3>⌖ &nbsp;Ongoing projects on/near selected route ({ongoingRouteProjects.length})</h3><span className="ongoing-live-badge">PAIMANA + GIS + LIVE SOURCES</span></div>
+          <div className="route-result-summary">
+            <span><b>{exactOngoingProjects.length}</b> exact/verified ongoing</span>
+            <span><b>{paimanaOngoingCandidates.length}</b> PAIMANA monitoring candidates</span>
+            <span><b>{ongoingRouteProjects.filter(p=>p.sourceClass==='mapped').length}</b> mapped construction (unverified)</span>
+          </div>
+          <div className="reference-project-cards">
+            {ongoingRouteProjects.map(p=>{
+              const exact=p.sourceVerified===true && p.sourceClass!=='paimana-location-candidate' && p.sourceClass!=='mapped';
+              const candidate=p.sourceClass==='paimana-location-candidate';
+              const mapped=p.sourceClass==='mapped';
+              return <button className={'reference-project-card '+(candidate?'paimana-route-project ':'')+(mapped?'mapped-route-project ':'')+(selectedProject?.id===p.id?'selected':'')} key={p.id} onClick={()=>selectProject(p)}>
+                <div className="ref-card-top"><span className={'ref-project-icon '+(String(p.type||'').toLowerCase().includes('bridge')?'bridge':String(p.type||'').toLowerCase().includes('water')?'water':String(p.type||'').toLowerCase().includes('rail')?'rail':'road')}>{String(p.type||'').toLowerCase().includes('bridge')?'⚑':String(p.type||'').toLowerCase().includes('water')?'≋':String(p.type||'').toLowerCase().includes('rail')?'▰':'▲'}</span><span className={'badge '+riskClass(p.risk||'')}>{p.risk||'Risk N/A'}</span></div>
+                <strong>{p.name||'Unnamed ongoing project'}</strong>
+                <small>{p.type||'Infrastructure'} · {p.location||'Route corridor'}</small>
+                <div className="ref-source-badge">{exact?'✓ EXACT / VERIFIED GIS':candidate?'PAIMANA · MONITORING CANDIDATE · LOCATION MATCH':mapped?'OSM MAPPED CONSTRUCTION · VERIFY STATUS':'SOURCE-BACKED · VERIFY GEOMETRY'}</div>
+                <div className="ref-card-facts"><span><b>Status</b> {p.status||'Ongoing'}</span><span><b>Progress</b> {p.progress!=null?`${p.progress}%`:'Source not reported'}</span><span><b>Distance</b> {p.distance!=null?`${Number(p.distance).toFixed(2)} km`:'Not calculated'}</span></div>
+                <div className="ref-progress"><span style={{width:`${Math.max(0,Math.min(100,Number(p.progress)||0))}%`}}/></div>
+                <div className="ref-card-foot"><span>{p.ministry||'Implementing agency not reported'}</span><span>{p.sourceType||'Source not available'}</span></div>
+              </button>
+            })}
+            {!ongoingRouteProjects.length&&<div className="empty-route-projects"><b>No ongoing route-supported project was returned.</b><span>Only source-backed records are shown. A PAIMANA project is marked as a monitoring candidate unless authoritative project GIS geometry confirms its exact footprint.</span></div>}
+          </div>
+        </div>
+      </section>
+      <aside className="project-detail-panel card reference-detail-panel">
+        {selectedProject ? <ProjectDetailPanel project={selectedProject} tab={detailTab} setTab={setDetailTab} onClose={()=>setSelectedProject(null)}/> : <div className="no-project-panel">
+          <div className="empty-icon">⌖</div>
+          <h3>{sourceStatus?.pending ? 'Searching the complete route corridor…' : verifiedOngoingCount===0 ? 'No verified ongoing project found' : 'Project search complete'}</h3>
+          {route && <div className="route-project-counts"><div><b>Projects displayed</b><strong>{detectedProjectCount}</strong></div><div><b>Real projects</b><strong>{realProjects.length}</strong></div><div><b>Verified ongoing</b><strong>{verifiedOngoingCount}</strong></div><div><b>Mapped construction</b><strong>{mappedUnverifiedCount}</strong></div><div><b>PAIMANA candidates</b><strong>{paimanaCandidateCount}</strong></div><div><b>Demo / simulated</b><strong>{demoProjectCount}</strong></div></div>}
+          <p>{sourceStatus?.pending ? 'OSRM route geometry is ready. Official GIS/work records are checked within 2 km and supplementary mapped construction within 5 km.' : verifiedOngoingCount===0 && paimanaCandidateCount===0 ? 'No route-supported ongoing project record was returned by the connected real-world sources for this route.' : paimanaCandidateCount>0 && verifiedOngoingCount===0 ? `${paimanaCandidateCount} PAIMANA monitoring candidate(s) matched this corridor by route locality/road text. Exact project footprint is not claimed without GIS geometry.` : 'Verified and supplementary matches are listed in the route project results.'}</p>
+          {!sourceStatus?.pending && <><div className="empty-state-note"><b>Live source diagnostics</b><br/>Telangana GIS: <b>{routeOptions.A?.constructionSource?.telanganaGIS===false?'unavailable':'checked'}</b> · OpenStreetMap: <b>{routeOptions.A?.constructionSource?.openStreetMap===false?'unavailable':'checked'}</b> · Government GIS records: <b>{routeOptions.A?.projects?.filter(p=>p.sourceClass==='official-state-gis'||p.sourceClass==='government-work-record').length||0}</b><br/><span>{routeOptions.A?.constructionSource?.error||'No route-matching project geometry was returned by the connected sources.'}</span></div></>}
+          {!sourceStatus?.pending && <button className="secondary retry-projects-btn" onClick={analyze}>↻ Search this route again</button>}
+        </div>}
+      </aside>
+    </div>
+  </Layout>
+}
+
+function ProjectDetailPanel({project,tab,setTab,onClose}){
+  const progress=Number.isFinite(Number(project.progress))?Number(project.progress):Number.isFinite(Number(project.physicalProgress))?Number(project.physicalProgress):null;
+  const original=Number.isFinite(Number(project.originalCost))?Number(project.originalCost):Number.isFinite(Number(project.approvedCost))?Number(project.approvedCost):null;
+  const revised=Number.isFinite(Number(project.cost))?Number(project.cost):Number.isFinite(Number(project.revisedCost))?Number(project.revisedCost):original;
+  const expenditure=Number.isFinite(Number(project.expenditure))?Number(project.expenditure):Number.isFinite(Number(project.cumulativeExpenditure))?Number(project.cumulativeExpenditure):null;
+  const financial=Number.isFinite(Number(project.financialProgress))?Number(project.financialProgress):(revised!==null&&revised>0&&expenditure!==null?Math.max(0,Math.min(100,Math.round(expenditure/revised*1000)/10)):null);
+  const startDate=project.start||project.startDate||null;
+  const completionDate=project.completion||project.revisedCompletion||project.targetCompletion||null;
+  const costOverrun=original!==null&&revised!==null&&original>0?((revised-original)/original*100):null;
+  const tabs=['Overview','Progress','AI Risk & Analysis','Predictions','Recommendations'];
+  const risk=project.risk||'Not available';
+  const riskScore=Number.isFinite(Number(project.riskScore))?Number(project.riskScore):null;
+  return <div className="project-panel-inner">
+    <div className="project-panel-head screenshot-head">
+      <div className="project-title-row"><span className={'project-hero-icon '+(String(project.type||'').toLowerCase().includes('bridge')?'bridge':'')}>{String(project.type||'').toLowerCase().includes('rail')?'▰':String(project.type||'').toLowerCase().includes('water')?'≋':'⚑'}</span><div><h2>{project.name}</h2><div className="project-chip-row"><span>{project.type||'Infrastructure'} Project</span><span className={'badge '+riskClass(risk)}>{risk}</span></div></div></div>
+      <button className="close-analysis" onClick={onClose}>×</button>
+    </div>
+    <div className="project-image-slot">{project.imageUrl?<img src={project.imageUrl} alt=""/>:<div className="project-image-placeholder">{String(project.type||'Infrastructure').toLowerCase().includes('bridge')?'▥':String(project.type||'').toLowerCase().includes('rail')?'▰':'⌖'}</div>}</div>
+    <div className="project-top-meta">
+      <div><span>Project ID</span><b>{project.id||'Not available'}</b></div>
+      <div><span>Ministry/Dept.</span><b>{project.ministry||'Not available'}</b></div>
+      <div><span>Location</span><b>{project.location||project.state||'Location not published'}</b></div>
+      {project.sourceUrl && <a href={project.sourceUrl} target="_blank" rel="noreferrer">Source ↗</a>}<div><span>Distance from route</span><b>{project.distance!=null?`${Number(project.distance).toFixed(2)} km`:'Not available'}</b></div><div><span>Verification</span><b>{project.sourceClass==='mapped'?'Mapped Construction – Verification Required':project.sourceClass==='paimana-location-candidate'?(project.verificationStatus||'PAIMANA Candidate – Verification Required'):project.isDemo===true||project.sourceClass==='route-demo'?'DEMO / SIMULATED – not a real project':project.sourceVerified===true?'Verified GIS / source geometry':'Verification Required'}</b></div>{(project.isDemo===true||project.sourceClass==='route-demo')&&<span className="badge demo-project-badge">DEMO / SIMULATED · not a real project</span>}
+    </div>
+    <div className="tabs project-panel-tabs">{tabs.map(t=><button key={t} className={tab===t?'active':''} onClick={()=>setTab(t)}>{t}</button>)}</div>
+
+    {tab==='Overview'&&<div className="detail-grid screenshot-detail-grid">
+      <div className="detail-card"><h4>▣ &nbsp;Project Summary</h4><dl>
+        <dt>Original Cost</dt><dd>{original===null?'Not available':`₹ ${original.toLocaleString()} Cr`}</dd>
+        <dt>Revised Cost</dt><dd>{revised===null?'Not available':`₹ ${revised.toLocaleString()} Cr`}{costOverrun!==null&&costOverrun>0?<em> (↑ {costOverrun.toFixed(0)}%)</em>:''}</dd>
+        <dt>Expenditure</dt><dd>{expenditure===null?'Not available':`₹ ${expenditure.toLocaleString()} Cr`}</dd>
+        <dt>Start Date</dt><dd>{startDate||'Not available'}</dd>
+        <dt>Expected Completion</dt><dd>{completionDate||'Not available'}</dd>
+        <dt>Current Status</dt><dd className="status-value">{project.status||'Ongoing'}</dd>
+      </dl></div>
+      <div className="detail-card progress-detail-card"><h4>◫ &nbsp;Progress</h4><div className="progress-circles"><div className="progress-ring" style={{'--progress':`${progress===null?0:progress}%`}}><b>{progress===null?'N/A':`${progress}%`}</b><span>Physical Progress</span></div><div className="progress-ring" style={{'--progress':`${financial===null?0:financial}%`}}><b>{financial===null?'N/A':`${financial}%`}</b><span>Financial Progress</span></div></div><p className="data-age">Latest: {project.lastUpdated||'Not available'}</p></div>
+      <div className="detail-card risk-detail"><h4>AI Analysis</h4><div className="risk-factor-layout"><div className="risk-gauge"><b>{riskScore===null?'N/A':riskScore}</b><span>{riskScore===null?'Risk score not available':'/100'}</span><strong>{risk}</strong></div><ul><li>Geographic match: {project.overlap||'Not available'}</li><li>Route distance: {Number.isFinite(Number(project.distance))?`${Number(project.distance).toFixed(2)} km`:'Not available'}</li><li>Location precision: {project.locationPrecision||'Not available'}</li></ul></div></div>
+      <div className="detail-card prediction-card"><h4>Predictions</h4><div className="prediction-row"><span>Calculated Cost Overrun</span><b>{costOverrun===null?'Not available':`${costOverrun.toFixed(1)}%`}</b></div><div className="prediction-row"><span>Delay Probability</span><b>{project.delayProbability==null?'Not available':`${project.delayProbability}%`}</b></div><div className="prediction-row"><span>Route impact delay</span><b>Not available without validated traffic model</b></div><div className="prediction-row"><span>Predicted Completion</span><b>{project.completion||'Source date unavailable'}</b></div></div>
+      <div className="detail-card"><h4>⌖ &nbsp;Project Details</h4><dl><dt>Type</dt><dd>{project.type||'Infrastructure'}</dd><dt>Location</dt><dd>{project.location||project.state||'Location not published'}</dd><dt>Implementing Agency</dt><dd>{project.agency||project.ministry||'Not reported by source'}</dd><dt>Status</dt><dd>{project.status||'Ongoing'}</dd></dl></div>
+      <div className="detail-card recommendation"><h4>Recommended Action</h4><p>{project.recommendation||'No source-backed recommendation is available for this project. Review its route interaction and coordinate with the implementing agency before construction planning.'}</p>{project.sourceUrl&&<a href={project.sourceUrl} target="_blank" rel="noreferrer">View Full Source ↗</a>}</div>
+    </div>}
+
+    {tab==='Progress'&&<div className="detail-card full-detail"><h4>Progress Evidence</h4><div className="progress-evidence"><div><b>{progress===null?'Not available':`${progress}%`}</b><span>Physical progress reported by source</span></div><div><b>{financial===null?'Not available':`${financial}%`}</b><span>Financial progress reported by source</span></div><div><b>{project.lastUpdated||project.source||'Source update not published'}</b><span>Latest source/update</span></div></div><p className="method-note">Values are displayed only when the underlying project source supplies them.</p></div>}
+    {tab==='AI Risk & Analysis'&&<div className="detail-card full-detail"><h4>AI Risk & Analysis</h4><div className="risk-analysis-big"><b>{riskScore===null?'N/A':riskScore}</b><span>Risk score</span></div><p>{risk}</p><p className="method-note">Risk is an evidence-based route-impact score in this version. It combines verified project proximity, overlap, project type and construction evidence. It is not a claim of live traffic speed.</p></div>}
+    {tab==='Predictions'&&<div className="detail-card full-detail"><h4>Predictions</h4><div className="prediction-row"><span>Calculated cost overrun</span><b>{costOverrun===null?'Not available':`${costOverrun.toFixed(1)}%`}</b></div><div className="prediction-row"><span>Delay probability</span><b>{project.delayProbability==null?'Not available':`${project.delayProbability}%`}</b></div><div className="prediction-row"><span>Validated route impact</span><b>Not available</b></div><div className="prediction-row"><span>Source completion</span><b>{completionDate||'Not available'}</b></div><p className="method-note">Traffic impact is forecast from project/construction evidence. For Google-style live speed prediction, connect a licensed live-traffic API.</p></div>}
+    {tab==='Recommendations'&&<div className="detail-card full-detail"><h4>Recommended Action</h4><p>{project.recommendation||'No source-backed action recommendation is available.'}</p><div className="source-box">Source: {project.sourceType||'Mapped/verified project source'} · {project.sourceVerified?'Geospatially verified':'Mapped feature'}</div></div>}
+  </div>
+}
+function RiskRadar(){
+ const [sector,setSector]=useState('All Sectors'); const [projects]=useProjects(); const p=projects[0]; const m=p?modelForProject(p):null; const data=m?[{s:'Cost Risk',project:m.costRisk,sector:52,national:42},{s:'Delay Risk',project:m.scheduleRisk,sector:55,national:45},{s:'Resource Risk',project:Math.min(100,Math.round((100-m.progress)*.7)),sector:50,national:48},{s:'Contract Risk',project:p.status==='Delayed'?72:45,sector:55,national:50},{s:'Environmental Risk',project:p.risk==='High'?65:45,sector:48,national:40},{s:'Land Acquisition Risk',project:p.progress<60?68:38,sector:50,national:44}]:[];
+ return <Layout><SectionTitle title="Risk & Conflict Radar"/><div className="card"><div className="toolbar right"><select value={sector} onChange={e=>setSector(e.target.value)}><option>All Sectors</option><option>Transport</option><option>Energy</option><option>Water</option></select></div><ResponsiveContainer width="100%" height={430}><RadarChart data={data}><PolarGrid/><PolarAngleAxis dataKey="s"/><PolarRadiusAxis domain={[0,100]}/><Radar name="This Project" dataKey="project" stroke="#ef3340" fill="#ef3340" fillOpacity={.18}/><Radar name="Sector Avg" dataKey="sector" stroke="#2478e8" fill="#2478e8" fillOpacity={.12}/><Radar name="National Avg" dataKey="national" stroke="#16a765" fill="#16a765" fillOpacity={.1}/><Legend/><Tooltip/></RadarChart></ResponsiveContainer>
+ <h3>Detected Conflicts</h3>{[['Land acquisition delay (State Govt)','High'],['Environmental clearance pending','Medium'],['Contractor dispute','Medium']].map(([x,r])=><div className="conflict" key={x}><span className={'alert-dot '+riskClass(r)}>!</span><b>{x}</b><RiskBadge value={r}/></div>)}</div></Layout>
+}
+
+function projectPoint(x){
+ if(Number.isFinite(Number(x?.lat))&&Number.isFinite(Number(x?.lng))) return {lat:Number(x.lat),lng:Number(x.lng)};
+ const c=x?.geometry?.coordinates;
+ if(x?.geometry?.type==='Point'&&Array.isArray(c)) return {lat:Number(c[1]),lng:Number(c[0])};
+ if(x?.geometry?.type==='LineString'&&Array.isArray(c)&&c.length) {const m=c[Math.floor(c.length/2)];return {lat:Number(m[1]),lng:Number(m[0])};}
+ return null;
+}
+function haversineKm(lat1,lon1,lat2,lon2){const R=6371,d=Math.PI/180,a=Math.sin((lat2-lat1)*d/2)**2+Math.cos(lat1*d)*Math.cos(lat2*d)*Math.sin((lon2-lon1)*d/2)**2;return 2*R*Math.asin(Math.sqrt(a));}
+function Dependencies(){
+ const [projects]=useProjects(); const [selected,setSelected]=useState(''); const p=projects.find(x=>x.id===selected)||projects[0];
+ const pp=projectPoint(p);
+ const deps=p&&pp?projects.filter(x=>x.id!==p.id).map(x=>{const q=projectPoint(x);return q?{project:x,distance:Math.round(haversineKm(pp.lat,pp.lng,q.lat,q.lng)*100)/100}:null}).filter(Boolean).filter(x=>x.distance<=50).sort((a,b)=>a.distance-b.distance):[];
+ return <Layout><SectionTitle title="Project Dependency & Coordination" sub="Nearby projects are calculated from available coordinates or GIS geometry. They are coordination candidates, not confirmed contractual dependencies."/>
+ <div className="card"><div className="toolbar right"><select value={selected||p?.id||''} onChange={e=>setSelected(e.target.value)} disabled={!projects.length}><option value="">Select project</option>{projects.map(x=><option key={x.id} value={x.id}>{x.id} — {x.name||'Unnamed project'}</option>)}</select></div>{p?<><div className="dependency-list"><div className="dependency-core"><b>{p.name||'Unnamed project'}</b><span>{p.state||'Location not specified'} · {pp?'Location available':'No usable location'}</span></div>{deps.length?deps.map(d=><div className="conflict" key={d.project.id}><span className="alert-dot medium">↔</span><div><b>{d.project.name||'Unnamed project'}</b><small>{d.project.sector||'Infrastructure'} · {d.project.status||'Status unavailable'}</small></div><span>{d.distance} km away</span></div>):<p className="muted">No nearby project with usable location evidence was found within 50 km.</p>}</div><p className="method-note">Suggested coordination checks: shared corridor, land/ROW, utilities, environmental clearances, procurement interfaces, milestones and contractor access. Confirm actual dependencies from departmental schedules and contracts.</p></>:<p className="muted">No project records available. Sync PAIMANA or import project data first.</p>}</div></Layout>
+}
+function Alerts(){
+ const [alerts,setAlerts]=useAlerts(); const [filter,setFilter]=useState('All'); const [toast,setToast]=useState(''); const isAdmin=getSession()?.user?.role==='Administrator'||getSession()?.role==='Administrator'; const filtered=alerts.filter(a=>filter==='All'||a.level.startsWith(filter));
+ const acknowledge=async(a)=>{if(!isAdmin){setToast('Administrator authentication required.');setTimeout(()=>setToast(''),3500);return}const r=await fetch(`${API}/alerts/${encodeURIComponent(a.id)}`,{method:'PATCH',headers:authHeaders({'Content-Type':'application/json'}),body:JSON.stringify({ack:true})});const d=await r.json();if(!r.ok){setToast(d.error||'Acknowledgement failed');setTimeout(()=>setToast(''),3500);return}setAlerts(xs=>xs.map(x=>x.id===a.id?d:x));setToast('Alert acknowledged successfully.');setTimeout(()=>setToast(''),3500)};
+ return <Layout><SectionTitle title="Risk Alerts & Early Warnings" sub="Generated from current project records and risk calculations"/>{toast&&<div className="toast-notification">{toast}</div>}<div className="card"><div className="toolbar right"><select value={filter} onChange={e=>setFilter(e.target.value)}><option>All</option><option>High</option><option>Medium</option></select></div>{filtered.length?filtered.map(a=><div className={'big-alert '+(a.ack?'ack':'')} key={a.id}><span className={'alert-dot '+riskClass(a.level)}>🔔</span><div className="alert-main"><RiskBadge value={a.level}/><h3>{a.project}</h3><p>{a.message}</p>{a.ack&&<small className="ack-meta">✓ Acknowledged {a.acknowledgedAt?new Date(a.acknowledgedAt).toLocaleString():''}{a.acknowledgedBy?` by ${a.acknowledgedBy}`:''}</small>}</div><time>{new Date(a.time).toLocaleString()}</time>{a.ack?<span className="badge low">Acknowledged</span>:isAdmin?<button className="ghost" onClick={()=>acknowledge(a)}>✓ Acknowledge</button>:<span className="locked-action">Admin only</span>}</div>):<p className="muted">No active alerts. Alerts appear only when current project data crosses the configured risk threshold.</p>}</div></Layout>
+}
+
+function monthsBetween(a,b){
+ try{const [am,ay]=String(a||'').split('/').map(Number),[bm,by]=String(b||'').split('/').map(Number);if(!am||!ay||!bm||!by)return 0;return (by-ay)*12+(bm-am)}catch{return 0}
+}
+function modelForProject(p){
+ const original=Number(p.originalCost||0), revised=Number(p.cost||p.revisedCost||0), spent=Number(p.expenditure||0), progress=Number(p.progress||0);
+ const overrun=original>0?Math.max(0,(revised-original)/original*100):0;
+ const spendPct=revised>0?Math.min(150,spent/revised*100):0;
+ const ev=revised*progress/100, pv=revised*Math.min(1,Math.max(0,progress/100+0.12)), cpi=spent>0?ev/spent:null, spi=pv>0?ev/pv:null;
+ const plannedSlip=monthsBetween(p.targetCompletion,p.revisedCompletion);
+ const scheduleRisk=Math.min(100,Math.round(Math.max(0,100-progress)*0.45+Math.max(0,plannedSlip)*5+Math.max(0,1-(spi??1))*30));
+ const costRisk=Math.min(100,Math.round(overrun*2.5+Math.max(0,spendPct-progress)*0.55));
+ const score=Math.min(100,Math.round(scheduleRisk*0.52+costRisk*0.48));
+ const delayMonths=Math.max(0,plannedSlip);
+ const predictedOverrun=Math.round(overrun*10)/10;
+ const dataFields=['originalCost','revisedCost','expenditure','progress','targetCompletion','revisedCompletion'].filter(k=>p[k]!==null&&p[k]!==undefined&&p[k]!=='' ).length;
+ const confidence=Math.round(dataFields/6*100);
+ return {original,revised,spent,progress,overrun,spendPct,ev,pv,cpi,spi,scheduleRisk,costRisk,score,delayMonths,predictedOverrun,confidence};
+}
+function driverData(p){const m=modelForProject(p);return [['Material price escalation',Math.min(30,Math.round(m.predictedOverrun*.9))],['Contractor / execution delay',Math.min(25,Math.round(m.scheduleRisk*.25))],['Land acquisition / ROW',p.progress<60?18:9],['Approvals & clearances',p.status==='Delayed'?15:7],['Design / scope changes',m.overrun>10?12:6]].map(([name,value])=>({name,value}));}
+function benchmarkData(projects,p){const peers=projects.filter(x=>x.sector===p.sector&&x.id!==p.id);const avg=peers.length?Math.round(peers.reduce((a,x)=>a+modelForProject(x).score,0)/peers.length):50;return {peerCount:peers.length,project:modelForProject(p).score,sectorAverage:avg,portfolioAverage:54};}
+function PredictiveAnalytics(){
+ const [projects]=useProjects(); const [selected,setSelected]=useState(projects[0]?.id||''); const p=projects.find(x=>x.id===selected)||projects[0]; const m=p?modelForProject(p):null; const drivers=p?driverData(p):[]; const bench=p?benchmarkData(projects,p):null;
+ if(!p)return <Layout><SectionTitle title="Predictive Analytics"/><div className="card">No projects available.</div></Layout>;
+ return <Layout><SectionTitle title="Predictive Analytics & Early Warning" sub="Evidence-based cost, schedule and risk analysis with transparent drivers"/><div className="toolbar card"><select value={selected} onChange={e=>setSelected(e.target.value)}>{projects.map(x=><option key={x.id} value={x.id}>{x.id} — {x.name}</option>)}</select><span className="model-status">Evidence-based analytical risk model · no unvalidated ML accuracy claimed</span></div>
+ <div className="stats"><Stat label="Calculated Cost Overrun" value={m.predictedOverrun.toFixed(1)+'%'} type={m.predictedOverrun>15?'high':'medium'}/><Stat label="Expected Delay" value={m.delayMonths+' months'} type={m.delayMonths>3?'high':'medium'}/><Stat label="Risk Score" value={m.score+'/100'} type={m.score>65?'high':'medium'}/><Stat label="Risk Evidence Score" value={m.score+'/100'} type={m.score>65?'high':'low'}/></div>
+ <div className="grid2"><div className="card"><div className="card-head"><h3>Risk Forecast</h3><span className="muted">Target vs projected risk</span></div><ResponsiveContainer width="100%" height={300}><LineChart data={[{m:'Now',risk:m.score,target:35},{m:'+3M',risk:Math.min(100,m.score+4),target:40},{m:'+6M',risk:Math.min(100,m.score+2),target:44},{m:'+9M',risk:m.score,target:48},{m:'+12M',risk:Math.max(0,m.score-2),target:50}]}><CartesianGrid strokeDasharray="3 3"/><XAxis dataKey="m"/><YAxis domain={[0,100]}/><Tooltip/><Legend/><Line dataKey="risk" name="Projected risk" stroke="#e05252" strokeWidth={3}/><Line dataKey="target" name="Target risk" stroke="#18a66a" strokeDasharray="6 4"/></LineChart></ResponsiveContainer></div><div className="card"><h3>Cost-Escalation Drivers</h3><ResponsiveContainer width="100%" height={300}><BarChart data={drivers} layout="vertical" margin={{left:20,right:20}}><XAxis type="number"/><YAxis type="category" dataKey="name" width={170} tick={{fontSize:11}}/><Tooltip/><Bar dataKey="value" fill="#2478e8" radius={[0,6,6,0]}/></BarChart></ResponsiveContainer></div></div>
+ <div className="grid2"><div className="card"><h3>Model & Data Quality</h3><div className="metric-box"><span>Explainable risk score</span><b>{m.score}/100</b></div><div className="metric-box"><span>Evidence score</span><b>{m.score}/100</b></div><div className="metric-box"><span>ML validation</span><b>Not validated</b></div><p className="method-note">Risk scoring uses the official project cost, expenditure, physical progress and original/revised completion dates. A true ML accuracy percentage is not reported because the April 2026 snapshot does not contain historical outcome labels required for independent model validation.</p></div><div className="card"><h3>Project Benchmarking</h3><div className="benchmark-bars"><div><span>This project</span><b>{bench.project}</b></div><div><span>{p.sector} peer average</span><b>{bench.sectorAverage}</b></div><div><span>Portfolio baseline</span><b>{bench.portfolioAverage}</b></div></div><p className="muted">Compared with {bench.peerCount} same-sector projects in the current registry.</p></div></div>
+ <div className="card recommendation-card"><h3>Early Warning & Recommended Action</h3><div className="warning-banner"><b>{m.score>=70?'CRITICAL INTERVENTION':'MANAGEMENT ATTENTION'}</b><span>{p.name}</span></div><ul className="decision-list"><li>{m.predictedOverrun>10?'Review procurement rates, change orders and remaining-cost exposure.':'Maintain approved cost controls.'}</li><li>{m.scheduleRisk>60?'Create a milestone recovery plan and review the critical path.':'Continue milestone monitoring.'}</li><li>{p.progress<60?'Validate physical progress with recent drone/site evidence.':'Continue evidence-based progress verification.'}</li></ul></div></Layout>
+}
+function EVM(){
+ const [projects]=useProjects(); const [selected,setSelected]=useState(projects[0]?.id||''); const p=projects.find(x=>x.id===selected)||projects[0]; const m=p?modelForProject(p):null; if(!p)return <Layout><SectionTitle title="Earned Value Management"/><div className="card">No projects available.</div></Layout>;
+ const pv=Math.round(m.revised*Math.max(.05,Math.min(1,m.progress/100+0.12))); const ev=Math.round(m.revised*m.progress/100); const ac=m.spent; const cpi=ac?ev/ac:1; const spi=pv?ev/pv:1; const eac=cpi?Math.round(m.revised/cpi):m.revised; const vac=m.revised-eac;
+ return <Layout><SectionTitle title="Earned Value Management (EVM)" sub="Financial and schedule performance indicators for decision makers"/><div className="toolbar card"><select value={selected} onChange={e=>setSelected(e.target.value)}>{projects.map(x=><option key={x.id} value={x.id}>{x.id} — {x.name}</option>)}</select></div><div className="evm-grid">{[['Planned Value (PV)',pv],['Earned Value (EV)',ev],['Actual Cost (AC)',ac],['CPI',cpi.toFixed(2)],['SPI',spi.toFixed(2)],['EAC',eac],['ETC',Math.max(0,eac-ac)],['VAC',vac],['TCPI',((m.revised-ev)/(m.revised-ac||1)).toFixed(2)]].map(([k,v])=><div className="evm-card" key={k}><small>{k}</small><strong>{typeof v==='number'&&k!=='CPI'&&k!=='SPI'?'₹ '+v.toLocaleString()+' Cr':v}</strong><span>{k==='CPI'?(cpi<1?'Below cost efficiency':'Healthy cost efficiency'):k==='SPI'?(spi<1?'Behind schedule':'On schedule'):''}</span></div>)}</div><div className="grid2"><div className="card"><h3>Performance Interpretation</h3><div className="metric-box"><span>Cost Variance (CV = EV − AC)</span><b>₹ {(ev-ac).toLocaleString()} Cr</b></div><div className="metric-box"><span>Schedule Variance (SV = EV − PV)</span><b>₹ {(ev-pv).toLocaleString()} Cr</b></div><div className="metric-box"><span>Variance at Completion (VAC)</span><b>₹ {vac.toLocaleString()} Cr</b></div></div><div className="card"><h3>What should the administrator do?</h3><ul className="decision-list"><li>{cpi<1?'Investigate cost drivers and change orders.':'Maintain current cost controls.'}</li><li>{spi<1?'Create a milestone recovery plan and review critical path.':'Continue milestone monitoring.'}</li><li>Validate physical progress against field evidence before approving the next release.</li></ul></div></div></Layout>
+}
+function ImageryMonitoring(){
+ const [projects]=useProjects(); const [selected,setSelected]=useState(projects[0]?.id||''); const [file,setFile]=useState(null); const [result,setResult]=useState(null); const p=projects.find(x=>x.id===selected)||projects[0];
+ const analyze=()=>{if(!file)return; setResult({fileName:file.name,size:file.size,uploadedAt:new Date().toISOString(),status:'evidence-uploaded'});};
+ return <Layout><SectionTitle title="Drone & Imagery Physical Progress" sub="Upload site imagery to compare observed visual progress with the project-reported progress"/><div className="grid2"><div className="card"><h3>1. Select project & upload evidence</h3><Field label="Project"><select value={selected} onChange={e=>setSelected(e.target.value)}>{projects.map(x=><option key={x.id} value={x.id}>{x.id} — {x.name}</option>)}</select></Field><div className="upload-box"><input id="droneFile" type="file" accept="image/*" onChange={e=>{setFile(e.target.files?.[0]||null);setResult(null)}}/><label htmlFor="droneFile">▧ Choose drone / site image</label>{file&&<p>{file.name} · {(file.size/1024).toFixed(0)} KB</p>}</div><button className="primary" disabled={!file} onClick={analyze}>Analyze Physical Progress</button><p className="method-note">The browser does not invent a progress percentage. A production deployment should send geo-referenced imagery to a validated computer-vision service and store its model/version, confidence and evidence timestamp before using the result for official decisions.</p></div><div className="card"><h3>2. Evidence result</h3>{result?<><div className="metric-box"><span>Evidence file</span><b>{result.fileName}</b></div><div className="metric-box"><span>File size</span><b>{(result.size/1024).toFixed(0)} KB</b></div><div className="metric-box"><span>Uploaded</span><b>{new Date(result.uploadedAt).toLocaleString()}</b></div><div className="form-note success">✓ Evidence file recorded. No progress percentage is invented; validated computer-vision analysis is required before official use.</div></>:<p className="muted">Upload a current site image to create an evidence record.</p>}</div></div></Layout>
+}
+
+function parseProjectDate(value,endOfMonth=false){
+ if(!value)return null;
+ const s=String(value).trim(); let m=s.match(/^(\d{1,2})[\/-](\d{4})$/);
+ if(m){const month=Number(m[1]),year=Number(m[2]);if(month<1||month>12)return null;return new Date(Date.UTC(year,month-(endOfMonth?0:1),endOfMonth?0:1));}
+ m=s.match(/^(\d{4})[\/-](\d{1,2})$/);
+ if(m){const year=Number(m[1]),month=Number(m[2]);if(month<1||month>12)return null;return new Date(Date.UTC(year,month-(endOfMonth?0:1),endOfMonth?0:1));}
+ const d=new Date(s);return Number.isNaN(d.getTime())?null:d;
+}
+function formatProjectDate(value){const d=parseProjectDate(value);return d?d.toLocaleDateString('en-IN',{day:'2-digit',month:'2-digit',year:'numeric',timeZone:'UTC'}):'Not available'}
+function dateDiffDays(a,b){const x=parseProjectDate(a),y=parseProjectDate(b,true);if(!x||!y)return null;return Math.max(0,Math.ceil((y-x)/86400000))}
+function timeMetrics(p){
+ const start=p.start||p.startDate||null;
+ const plannedEnd=p.targetCompletion||p.completion||null;
+ const revisedEnd=p.revisedCompletion||p.completion||plannedEnd;
+ const planned=dateDiffDays(start,plannedEnd);
+ const actualEnd=p.status==='Completed'?(p.actualCompletion||p.actualEnd||null):null;
+ const endForElapsed=actualEnd||revisedEnd||plannedEnd;
+ const startDate=parseProjectDate(start);
+ const now=new Date();
+ const elapsed=startDate?Math.max(0,Math.ceil(((actualEnd?parseProjectDate(actualEnd):now)-startDate)/86400000)):null;
+ const actual=actualEnd?dateDiffDays(start,actualEnd):elapsed;
+ const targetDate=parseProjectDate(plannedEnd,true);
+ const calendarDelay=!actualEnd&&targetDate?Math.max(0,Math.ceil((now-targetDate)/86400000)):null;
+ const durationDelay=actual===null||planned===null?null:Math.max(0,actual-planned);
+ const delay=actualEnd?durationDelay:calendarDelay;
+ const delayPct=delay===null||!planned?null:Math.round(delay/planned*1000)/10;
+ return {planned,actual,delay,delayPct,plannedEnd,revisedEnd,actualEnd,expectedEnd:endForElapsed};
+}
+function Reports(){
+ const [projects]=useProjects(); const [tab,setTab]=useState('Cost Overrun');
+ const rows=projects.map(p=>({...p,model:modelForProject(p),time:timeMetrics(p)}));
+ const sectors=[...new Set(rows.map(p=>p.sector).filter(Boolean))].map(name=>({name,value:rows.filter(p=>p.sector===name).reduce((a,p)=>a+p.model.predictedOverrun,0)/(rows.filter(p=>p.sector===name).length||1)}));
+ return <Layout><SectionTitle title="Reports & Analytics" sub="Generated from the current project registry; source dates are preserved and duration/delay are calculated where possible"/><div className="card"><div className="tabs pills">{['Cost Overrun','Time Delay','Progress','Drivers','Benchmarking','Sector Analysis','Ministry Wise'].map(x=><button className={tab===x?'active':''} onClick={()=>setTab(x)} key={x}>{x}</button>)}</div>
+ {rows.length===0?<div className="report-placeholder"><b>No report data available</b><p>Add/import project records first.</p></div>:<>
+ {tab==='Cost Overrun'&&<><h3>Project Cost Exposure</h3><div className="table-scroll"><table><thead><tr><th>Project</th><th>Original</th><th>Revised</th><th>Cost Overrun</th><th>Expenditure</th></tr></thead><tbody>{rows.map(p=><tr key={p.id}><td>{p.name}</td><td>{p.originalCost??'Not available'}</td><td>{(p.revisedCost??p.cost)??'Not available'}</td><td>{p.model.original>0&&p.model.revised>=0?`${p.model.predictedOverrun.toFixed(1)}%`:'Not available'}</td><td>{p.expenditure??'Not available'}</td></tr>)}</tbody></table></div></>}
+ {tab==='Time Delay'&&<><h3>Time & Completion Analysis</h3><p className="method-note">Planned duration uses Start → Original/Target Completion. For completed projects, Actual End is shown only when an actual completion field is available. For ongoing projects, Revised/Expected End is shown; delay is calculated only where the available dates support it.</p><div className="table-scroll"><table><thead><tr><th>Project</th><th>Started</th><th>Original Planned End</th><th>Revised / Expected End</th><th>Actual End</th><th>Planned Duration</th><th>Elapsed / Actual Duration</th><th>Delay</th></tr></thead><tbody>{rows.map(p=><tr key={p.id}><td><b>{p.name}</b></td><td>{formatProjectDate(p.start)}</td><td>{formatProjectDate(p.targetCompletion||p.completion)}</td><td>{formatProjectDate(p.revisedCompletion||p.completion)}</td><td>{p.time.actualEnd?formatProjectDate(p.time.actualEnd):'Ongoing'}</td><td>{p.time.planned==null?'Not available':`${p.time.planned} days`}</td><td>{p.time.actual==null?'Not available':`${p.time.actual} days`}</td><td>{p.time.delay==null?'Not available':p.time.delay>0?`${p.time.delay} days`:'On schedule'}</td></tr>)}</tbody></table></div></>}
+ {tab==='Progress'&&<><h3>Project Progress</h3><div className="table-scroll"><table><thead><tr><th>Project</th><th>Started</th><th>Ended / Expected</th><th>Physical Progress</th><th>Financial Progress</th><th>Status</th><th>Data Source</th></tr></thead><tbody>{rows.map(p=><tr key={p.id}><td>{p.name}</td><td>{formatProjectDate(p.start)}</td><td>{p.status==='Completed'&&p.time.actualEnd?formatProjectDate(p.time.actualEnd):formatProjectDate(p.revisedCompletion||p.completion)}</td><td>{p.progress==null?'Not available':`${p.progress}%`}</td><td>{p.financialProgress==null?'Not available':`${p.financialProgress}%`}</td><td>{p.status||'Not available'}</td><td>{p.sourceType||'Not available'}</td></tr>)}</tbody></table></div></>}
+ {tab==='Drivers'&&<div className="table-scroll"><table><thead><tr><th>Project</th><th>Cost Risk</th><th>Schedule Risk</th><th>Top Driver</th></tr></thead><tbody>{rows.map(p=><tr key={p.id}><td>{p.name}</td><td>{p.model.costRisk}</td><td>{p.model.scheduleRisk}</td><td>{driverData(p)[0].name}</td></tr>)}</tbody></table></div>}
+ {tab==='Benchmarking'&&<div className="table-scroll"><table><thead><tr><th>Project</th><th>Risk Score</th><th>Peer Count</th><th>Sector Average</th></tr></thead><tbody>{rows.map(p=>{const b=benchmarkData(projects,p);return <tr key={p.id}><td>{p.name}</td><td>{p.model.score}</td><td>{b.peerCount}</td><td>{b.sectorAverage}</td></tr>})}</tbody></table></div>}
+ {tab==='Sector Analysis'&&<div className="table-scroll"><table><thead><tr><th>Sector</th><th>Average Calculated Cost Overrun</th></tr></thead><tbody>{sectors.map(x=><tr key={x.name}><td>{x.name}</td><td>{x.value.toFixed(1)}%</td></tr>)}</tbody></table></div>}
+ {tab==='Ministry Wise'&&<div className="table-scroll"><table><thead><tr><th>Ministry</th><th>Projects</th></tr></thead><tbody>{[...new Set(rows.map(x=>x.ministry).filter(Boolean))].map(x=><tr key={x}><td>{x}</td><td>{rows.filter(p=>p.ministry===x).length}</td></tr>)}</tbody></table></div>}
+ </>}</div></Layout>
+}
+function DataSources(){
+ const [info,setInfo]=useState(null); const [file,setFile]=useState(null); const [message,setMessage]=useState(''); const [error,setError]=useState(''); const [busy,setBusy]=useState(false); const [syncing,setSyncing]=useState(false);
+ const load=()=>fetch(`${API}/data-sources`).then(r=>r.json()).then(setInfo).catch(e=>setError(e.message));
+ useEffect(()=>{load()},[]);
+ const syncPaimana=async()=>{setSyncing(true);setMessage('');setError('');try{const r=await fetch(`${API}/paimana/sync`,{method:'POST'});const d=await r.json();if(!r.ok)throw new Error(d.error||'PAIMANA sync failed');setMessage(`PAIMANA sync complete: ${d.imported} official portfolio records imported. Exact route matching still requires verified GIS geometry.`);load();}catch(e){setError(e.message)}finally{setSyncing(false)}};
+ const importGeoJSON=async()=>{if(!file)return;setBusy(true);setMessage('');setError('');try{const text=await file.text();const payload=JSON.parse(text);const r=await fetch(`${API}/projects/import`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const d=await r.json();if(!r.ok)throw new Error(d.error||'Import failed');setMessage(`Imported ${d.imported} verified GIS project record(s). Total route-eligible records: ${d.totalVerifiedProjects}.`);load();}catch(e){setError(e.message)}finally{setBusy(false)}};
+ const downloadTemplate=()=>{const sample={type:'FeatureCollection',features:[{type:'Feature',geometry:{type:'Point',coordinates:[78.4867,17.385]},properties:{id:'GIS-001',name:'Example Verified Project',ministry:'Example Department',sector:'Transport',state:'',status:'Ongoing',progress:42,originalCost:150,cost:175,expenditure:60,risk:'Medium',sourceType:'REPLACE_WITH_AUTHORITATIVE_GIS_SOURCE',sourceUrl:'REPLACE_WITH_REAL_SOURCE_URL',sourceVerified:false,locationPrecision:'point'}}]};const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(sample,null,2)],{type:'application/geo+json'}));a.download='verified-projects.template.geojson';a.click();};
+ return <Layout><SectionTitle title="GIS Data & Sources" sub="The route engine is India-wide. Exact project detection depends on verified project geometry; this page is the controlled import point for that national GIS layer."/>
+  <div className="stats"><Stat label="PAIMANA Portfolio" value={paimanaOverview.totalProjects.toLocaleString()} type="total"/><Stat label="Verified GIS records" value={info?.registry?.count??'—'} type="medium"/><Stat label="On-route threshold" value="≤ 500 m" type="low"/><Stat label="Official corridor" value="≤ 2 km" type="medium"/><Stat label="OSM supplementary" value="≤ 5 km" type="low"/><Stat label="Routing / GIS services" value="4+" type="high"/></div>
+  <div className="grid2">
+   <div className="card paimana-source-card"><div className="card-head"><h3>PAIMANA official project register · 1,981 projects</h3><button className="view-btn" disabled={syncing} onClick={syncPaimana}>{syncing?'Syncing…':'Sync PAIMANA'}</button></div><p className="muted">Pull the current public PAIMANA portfolio into the project register. This imports official project metadata only; it does not invent coordinates or physical progress.</p><div className="analysis-action">Official source: MoSPI / IPMD PAIMANA public dashboard</div><p className="muted">After sync, add authoritative GIS geometry through the verified import below before a project can appear as an exact route conflict.</p></div>
+   <div className="card"><div className="card-head"><h3>Import verified project GIS</h3></div><p className="muted">Use GeoJSON with Point, LineString or MultiLineString geometry. The backend will never geocode a project name and call that location exact.</p><input type="file" accept=".geojson,.json,application/geo+json,application/json" onChange={e=>setFile(e.target.files?.[0]||null)}/><div className="wizard-actions"><button className="ghost" onClick={downloadTemplate}>Download template</button><button className="primary" disabled={!file||busy} onClick={importGeoJSON}>{busy?'Importing…':'Import verified GIS'}</button></div>{message&&<div className="form-note success">✓ {message}</div>}{error&&<div className="form-note error">{error}</div>}</div>
+   <div className="card"><h3>Route matching rules</h3><div className="analysis-action">≤ 500 m → On / overlapping route</div><div className="analysis-action">500 m–2 km → Official near-route</div><div className="analysis-action">2–5 km → OSM supplementary only</div><div className="analysis-action">&gt; 5 km → Not displayed</div><p className="muted">Linear infrastructure should use LineString/MultiLineString geometry. Point geometry is allowed only when the coordinate is verified.</p></div>
+  </div>
+  <div className="card"><div className="card-head"><h3>Evidence layers</h3><button className="view-btn" onClick={load}>Refresh</button></div><div className="table-scroll"><table><thead><tr><th>Source</th><th>Scope</th><th>Route eligible</th><th>Progress rule</th></tr></thead><tbody>{(info?.sources||[]).map(x=><tr key={x.name}><td><b>{x.name}</b></td><td>{x.scope}</td><td>{x.routeEligible?'Yes':'Only after verified geometry import'}</td><td>{x.progress}</td></tr>)}</tbody></table></div><p className="muted">This separation prevents the system from presenting a tender, district name, or guessed geocode as proof that a project is physically on a selected route.</p></div>
+ </Layout>
+}
+
+function AddProject(){
+ const isAdmin=getSession()?.user?.role==='Administrator'||getSession()?.role==='Administrator';
+ if(!isAdmin)return <Layout><SectionTitle title="Add New Infrastructure Project" sub="Administrator-only data management"/><div className="card access-locked"><h2>Administrator authentication required.</h2><p className="muted">General users can view and search the portal, but cannot add or modify project records.</p></div></Layout>;
+ const [step,setStep]=useState(1); const [projects,setProjects]=useProjects(); const [saving,setSaving]=useState(false); const [form,setForm]=useState({name:'',ministry:'',sector:'Transport',state:'',agency:'',description:'',originalCost:'',revisedCost:'',start:'',completion:'',lat:'',lng:'',sourceUrl:''});
+ const set=(k,v)=>setForm({...form,[k]:v});
+ const score=useMemo(()=>{let s=30;if(Number(form.revisedCost)>Number(form.originalCost||0)*1.2)s+=30;if(form.sector==='Transport')s+=10;if(form.completion&&form.start)s+=8;return Math.min(100,s)},[form]);
+ const next=()=>{if(step===1&&!form.name.trim())return alert('Enter project name');if(step===3&&((form.lat&&!form.lng)||(form.lng&&!form.lat)))return alert('Enter both latitude and longitude, or leave both blank.');setStep(Math.min(4,step+1))};
+ const save=async()=>{
+   if(!(await reauthenticateAdmin()))return;
+   const risk=score>=70?'High':score>=45?'Medium':'Low';
+   const p={id:'P-'+String(100+projects.length).padStart(3,'0'),name:form.name,ministry:form.ministry||'Department',sector:form.sector,state:form.state,risk,progress:null,cost:Number(form.revisedCost||form.originalCost||0),originalCost:Number(form.originalCost||0),expenditure:null,start:form.start||null,completion:form.completion||null,status:'New',agency:form.agency,description:form.description,lat:form.lat?Number(form.lat):undefined,lng:form.lng?Number(form.lng):undefined,sourceUrl:form.sourceUrl||undefined};
+   setSaving(true);
+   try{const r=await fetch(`${API}/projects`,{method:'POST',headers:authHeaders({'Content-Type':'application/json'}),body:JSON.stringify(p)});const saved=await r.json();if(!r.ok)throw new Error(saved.error||'Could not create project');setProjects(xs=>[...xs,saved]);setStep(4);}catch(e){alert(e.message)}finally{setSaving(false)}
+ };
+ return <Layout><SectionTitle title="Add New Infrastructure Project" sub="Projects enter the dashboard immediately. User-entered coordinates are not treated as authoritative route geometry; route matching requires independent GIS verification through GIS Data & Sources."/><div className="card wizard"><div className="steps">{['Basic Details','Financial Details','Location & Timeline','Review'].map((x,i)=><div className={step===i+1?'current':''} key={x}><span>{i+1}</span>{x}</div>)}</div>
+ {step===1&&<div className="form-grid"><Field label="Project Name *"><input value={form.name} onChange={e=>set('name',e.target.value)} placeholder="Enter project name"/></Field><Field label="Ministry/Department *"><input value={form.ministry} onChange={e=>set('ministry',e.target.value)} placeholder="Select ministry"/></Field><Field label="Sector *"><select value={form.sector} onChange={e=>set('sector',e.target.value)}>{['Transport','Energy','Water','Communication','Social Infra','Railway','Metro','Others'].map(x=><option key={x}>{x}</option>)}</select></Field><Field label="State / UT *"><input value={form.state} onChange={e=>set('state',e.target.value)} placeholder="State or Union Territory"/></Field><Field label="Implementing Agency *" full><input value={form.agency} onChange={e=>set('agency',e.target.value)} placeholder="Enter agency name"/></Field><Field label="Project Description" full><textarea value={form.description} onChange={e=>set('description',e.target.value)} placeholder="Enter project description"/></Field></div>}
+ {step===2&&<div className="form-grid"><Field label="Original Cost (₹ Cr)"><input type="number" value={form.originalCost} onChange={e=>set('originalCost',e.target.value)} placeholder="12000"/></Field><Field label="Revised Cost (₹ Cr)"><input type="number" value={form.revisedCost} onChange={e=>set('revisedCost',e.target.value)} placeholder="15000"/></Field></div>}
+ {step===3&&<div className="form-grid"><Field label="Latitude (optional; must be independently verified)"><input type="number" step="any" value={form.lat} onChange={e=>set('lat',e.target.value)} placeholder="17.3850"/></Field><Field label="Longitude (optional; must be independently verified)"><input type="number" step="any" value={form.lng} onChange={e=>set('lng',e.target.value)} placeholder="78.4867"/></Field><Field label="Start Date"><input type="date" value={form.start} onChange={e=>set('start',e.target.value)}/></Field><Field label="Expected Completion"><input type="date" value={form.completion} onChange={e=>set('completion',e.target.value)}/></Field><Field label="Source URL" full><input value={form.sourceUrl} onChange={e=>set('sourceUrl',e.target.value)} placeholder="Official departmental / GIS source URL"/></Field><div className="form-note">If coordinates are blank, the project is dashboard-only and will <b>not</b> be shown as a route conflict. This prevents false geographic matches.</div></div>}
+ {step===4&&<div className="review"><h3>Review & Risk Estimate</h3><div className="review-grid">{Object.entries(form).filter(([k])=>k!=='description').map(([k,v])=><div key={k}><small>{k}</small><b>{v||'—'}</b></div>)}</div><div className="score-preview"><span>Estimated Risk Score</span><b>{score}/100</b><RiskBadge value={score>=70?'High':score>=45?'Medium':'Low'}/></div><p className="muted">Route matching: {form.lat&&form.lng?'Eligible after verified-coordinate import':'Not eligible until verified GIS geometry is supplied'}.</p></div>}
+ <div className="wizard-actions"><button className="ghost" onClick={()=>setStep(Math.max(1,step-1))}>Back</button>{step<4?<button className="primary" onClick={next}>Next →</button>:<button className="primary" disabled={saving} onClick={save}>{saving?'Saving…':'Create Project ✓'}</button>}</div></div></Layout>
+}
+
+function Field({label,children,full}){return <label className={full?'full':''}><span>{label}</span>{children}</label>}
+
+function Assistant(){
+ const [projects]=useProjects(); const [messages,setMessages]=useState([{role:'assistant',text:'Ask about a project in the current registry. I will answer only from available project data and calculated risk metrics.'}]); const [input,setInput]=useState('');
+ const send=()=>{if(!input.trim())return;const q=input.toLowerCase();const p=projects.find(x=>(x.name||'').toLowerCase().includes(q)||(x.id||'').toLowerCase()===q.trim());let text;if(!projects.length) text='No project records are currently available. Add a project or import an authoritative dataset first.'; else if(p){const m=modelForProject(p);text=`${p.name}: status ${p.status||'Not available'}, progress ${p.progress??'Not available'}%, risk ${p.risk||'Not available'}. Calculated risk score is ${m.score}/100, predicted cost overrun ${m.predictedOverrun.toFixed(1)}%, expected delay ${m.delayMonths} months. These are calculations from the stored record, not a claim of validated ML accuracy.`;} else if(q.includes('high risk')){const high=projects.filter(x=>x.risk==='High');text=high.length?`There are ${high.length} high-risk project records. ${high.slice(0,5).map(x=>x.name).join(', ')}.`:'No project is currently marked High Risk.';} else if(q.includes('recommend')) text='Select or name a project and I can calculate data-driven cost, schedule and risk indicators from its current record.'; else text='I can answer about projects, status, progress, cost, risk, alerts and calculated dependencies when those fields exist in the current registry.';setMessages(xs=>[...xs,{role:'user',text:input},{role:'assistant',text}]);setInput('')};
+ return <Layout><SectionTitle title="AI Infrastructure Assistant" sub="Data-grounded assistant — no fabricated project facts"/><div className="assistant card"><div className="messages">{messages.map((m,i)=><div className={'message '+m.role} key={i}><div className="bubble">{m.text}</div><small>{m.role==='user'?'You':'Infra Risk Radar'}</small></div>)}</div><div className="chat-input"><input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==='Enter'&&send()} placeholder="Ask about a project, risk, cost, delay..."/><button className="primary" onClick={send}>➤</button></div></div></Layout>
+}
+function App(){
+ return <Routes><Route path="/login" element={<Login/>}/><Route path="/*" element={<Protected><Routes><Route path="/" element={<Dashboard/>}/><Route path="/paimana" element={<PaimanaOverview/>}/><Route path="/route" element={<RouteAnalysis/>}/><Route path="/map" element={<RouteAnalysis/>}/><Route path="/projects" element={<Projects/>}/><Route path="/projects/:id" element={<ProjectDetail/>}/><Route path="/predictive" element={<PredictiveAnalytics/>}/><Route path="/evm" element={<EVM/>}/><Route path="/imagery" element={<ImageryMonitoring/>}/><Route path="/risk" element={<RiskRadar/>}/><Route path="/dependencies" element={<Dependencies/>}/><Route path="/alerts" element={<Alerts/>}/><Route path="/reports" element={<Reports/>}/><Route path="/add" element={<AddProject/>}/><Route path="/assistant" element={<Assistant/>}/></Routes></Protected>}/></Routes>
+}
+createRoot(document.getElementById('root')).render(<BrowserRouter><App/></BrowserRouter>);

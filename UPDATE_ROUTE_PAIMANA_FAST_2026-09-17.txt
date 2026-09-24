@@ -1,0 +1,16 @@
+Infra Risk Radar – Map & Conflict update
+
+Changes made:
+1. Find Route now returns the OSRM driving route first. External PAIMANA/GIS/OSM scans are no longer awaited by the initial route endpoint.
+2. Live project scanning continues in the background through /api/route-live-projects.
+3. OSM construction lookup now samples the actual route and sends small parallel Overpass corridors instead of one giant bounding box for the whole trip. This reduces long-route timeouts.
+4. PAIMANA candidate geocoding is concurrent and bounded to a controlled candidate set, so PAIMANA monitoring records can appear faster.
+5. PAIMANA ongoing candidates are selected as the detail panel fallback when no verified GIS project is available.
+6. The sidebar now has always-visible quick actions: Add New Project and AI Assistance.
+7. Existing View/Edit/Delete project-register button spacing is preserved.
+
+Important data rule:
+- PAIMANA April 2026 contains 1,981 project records in this build, but the portfolio snapshot does not provide universal GPS geometry for every project.
+- A PAIMANA place-name match is therefore displayed as a monitoring candidate, not falsely labelled as an exact route intersection.
+- Exact/on-route classification remains reserved for verified project GIS geometry or official GIS/work records.
+- No synthetic/demo project is added to hide a missing real match.

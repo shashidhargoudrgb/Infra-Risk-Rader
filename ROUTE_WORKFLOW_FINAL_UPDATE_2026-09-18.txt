@@ -1,0 +1,12 @@
+FINAL ROUTE WORKFLOW UPDATE
+
+1. Fixed route-analysis coordinate query handling: missing URL coordinates no longer become 0,0 because Number(null)=0.
+2. Actual India-scoped geocoding is used when coordinates are not supplied.
+3. OSRM full driving geometry remains the fast first response.
+4. Verified GIS/government geometry is matched against the actual route corridor (2 km).
+5. PAIMANA April 2026 records are searched using selected endpoint names and mapped road references; arbitrary 30-record truncation was removed.
+6. Up to 120 PAIMANA candidates can be geographically checked in the background, and only candidates whose geocoded location falls within the configured corridor are returned as monitoring candidates.
+7. Live source checks run after the route is visible so slow OSM/public sources cannot block routing.
+8. No synthetic/demo project is added to claim that a route has projects.
+9. Exact route match is reserved for records with verified project GIS geometry. PAIMANA name/location geocoding is explicitly labelled as a monitoring candidate, not authoritative exact project geometry.
+10. Existing Map/Route, monitoringCandidates, Add New Project, AI Assistance, and Analytics validation fixes are retained.

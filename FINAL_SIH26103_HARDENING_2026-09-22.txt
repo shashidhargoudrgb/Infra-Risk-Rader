@@ -1,0 +1,18 @@
+FINAL SIH 26103 HARDENING - 22 SEP 2026
+
+Changes in this build:
+1. Map & Conflict navigation no longer hides Projects, Drone/Imagery, Alerts, or other portal sections.
+2. Removed the injected Settings row from Map & Conflict navigation.
+3. Preserved a stable navigation order across the portal.
+4. Analytics Readiness now explicitly shows the validation gates required before any ML accuracy percentage is displayed.
+5. Removed unvalidated forward-looking risk forecast values from Predictive Analytics.
+6. Predictive Analytics now distinguishes observed/evidence-based metrics from validated ML predictions.
+7. CUF fields and proposed additional variables are shown separately.
+8. Benchmarking is labelled descriptive evidence comparison, not prediction accuracy.
+9. Login heading 'National Infrastructure Intelligence Platform' is enlarged.
+10. Existing Map & Conflict route/map UI is retained; route project markers remain source-labelled.
+11. No fabricated ML accuracy, probability, coordinates, or projects are introduced.
+12. April 2026 PAIMANA national portfolio remains 1,981 projects and is kept as the official snapshot.
+
+Validation note:
+Backend JavaScript syntax passed `node --check`. A complete Vite production build could not be executed in the packaging environment because dependency installation timed out; run `npm install`/`npm run build` in the frontend directory before production deployment if dependencies are not already installed.

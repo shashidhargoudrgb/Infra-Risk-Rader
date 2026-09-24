@@ -1,0 +1,26 @@
+PAIMANA APRIL 2026 UPDATE
+
+Official MoSPI/PIB Flash Report (published 25 May 2026):
+- 1,981 ongoing Central Sector infrastructure projects
+- 17 Central Ministries/Departments
+- Revised cost: ₹42.78 lakh crore
+- Cumulative expenditure: ₹20.36 lakh crore
+- Original cost: approximately ₹37.13 lakh crore
+- 814 Mega projects and 1,167 Major projects
+- 9 projects commissioned during April 2026
+- 55 additional projects brought under PAIMANA monitoring during April 2026
+- Transport & Logistics: 1,459 projects, revised cost ₹23.34 lakh crore
+
+Official source:
+https://www.pib.gov.in/PressReleasePage.aspx?PRID=2264967&lang=2&reg=48
+
+Important:
+The application must distinguish the official 1,981-project portfolio from the route-ready detailed geometry registry. No duplicate/fabricated records are created to inflate the registry to 1,981. Route matching uses only source-backed geometry and does not invent projects when no verified geometry is available.
+
+UI UPDATE — September 2026 build
+- PAIMANA is now prominently shown as 1,981 projects for the April 2026 official snapshot.
+- Dashboard shows a dedicated PAIMANA 1,981 banner and keeps detailed registry counts separate.
+- Projects Register shows PAIMANA April 2026: 1,981 national projects.
+- GIS Data & Sources shows the 1,981 PAIMANA portfolio count.
+- PAIMANA page includes official April 2026 sector/ministry statistics and an analytics-readiness note. Fabricated ML benchmark figures are not displayed.
+- The Map & Conflict implementation was not modified by this UI update.

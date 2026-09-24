@@ -1,0 +1,10 @@
+UPDATE — 22 SEP 2026
+
+1. April 2026 PAIMANA (1,981 records) is now the primary source for route project cards.
+2. Route cards show up to 8 PAIMANA-first records, using other source-backed records only when fewer PAIMANA candidates are available.
+3. No demo/simulated route projects are generated.
+4. PAIMANA candidate ranking uses endpoint/road-reference matches and ongoing status.
+5. PAIMANA map points remain approximate unless authoritative GIS geometry exists; no fake coordinates are generated.
+6. Project markers are small circular dots and correspond to the displayed project records.
+7. Login visual now includes a larger National Infrastructure Intelligence Platform heading.
+8. Map scale note is flush to the bottom edge to remove the visible gap.

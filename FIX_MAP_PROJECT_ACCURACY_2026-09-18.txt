@@ -1,0 +1,25 @@
+Infra Risk Radar - Map & Project Accuracy Fix
+
+Changes in this build:
+1. Fixed the map crash caused by invalid/null route/project coordinates.
+2. Route map now draws the actual selected driving route explicitly.
+3. Added strict coordinate and GeoJSON validation before Leaflet renders data.
+4. Added map invalidateSize + ResizeObserver handling to prevent blank maps.
+5. PAIMANA route candidates are no longer forcibly changed to lat:null/lng:null after resolution.
+6. Added a fast offline place-name anchor fallback for known Indian places. These points are explicitly labelled approximate and are NOT treated as authoritative project GIS geometry.
+7. PAIMANA route candidates now preserve source fields: project ID, ministry, agency, cost, revised cost, expenditure, progress, dates, status, risk, project type and approximate location where available.
+8. Route project result cards are limited to the best 8 ongoing/source-supported records for a clean SIH demo. The source-match count remains visible.
+9. Candidate markers at the same approximate place are clustered into one numbered map marker instead of hiding each other.
+10. Project detail panel remains source-first: unavailable fields are shown as Not available/Not reported rather than fabricated.
+11. Live source calls use shorter independent timeouts so external GIS/OSM outages do not hold the map for a long time.
+12. PAIMANA local snapshot is used immediately at server startup instead of blocking the first route on a live PAIMANA refresh.
+13. Public Nominatim usage is rate-limited and cached; approximate geocoding is supplemental only.
+
+Accuracy rule:
+- Verified GIS geometry = exact route corridor evidence.
+- PAIMANA place-name anchor = approximate monitoring evidence and visibly labelled.
+- OSM construction = supplementary/unverified construction evidence.
+- No synthetic project is created merely to force a 5-8 count.
+
+Recommended production upgrade:
+Replace approximate PAIMANA place-name anchors with authoritative project GIS geometry or a licensed/self-hosted geocoder/GIS dataset for exact national project points.

@@ -1,0 +1,21 @@
+Infra Risk Radar - merged build
+
+Base application: INDIA_WIDE_ROUTING_FINAL_V2
+Imported data: all 14 project records from the Selected_Routes build.
+
+Preservation rule:
+- The India-wide routing frontend (frontend/src/main.jsx) was not replaced.
+- OSM route calculation, route accuracy logic, verified GeoJSON pipeline, route-live-projects logic,
+  overlap analysis, and map rendering remain from the India-wide build.
+- Imported project records are stored in backend/data/selected-routes-imported-projects.json
+  and merged into backend/infra_risk_data.json for dashboard/API availability.
+
+Important data note:
+The imported records are retained exactly as supplied by the first file. They should not be
+represented as independently verified live government records unless their source is verified.
+The map's routing accuracy is not changed by this merge.
+
+Run:
+1. Open this folder in VS Code.
+2. Run setup.bat (first time).
+3. Run start-all.bat.

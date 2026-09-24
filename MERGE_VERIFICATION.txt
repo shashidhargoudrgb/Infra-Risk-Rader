@@ -1,0 +1,16 @@
+FINAL MERGE CONTENTS
+
+This package uses the fixed PAIMANA + Project Actions + Dependencies implementation as the working application base.
+The selected-route map implementation in frontend/src/main.jsx is retained from File 2 and was not replaced.
+PAIMANA portfolio loading, project records, project actions, dependencies, route map, data sources and backend data files are retained together.
+
+Run:
+1. Open this folder in VS Code.
+2. Run setup.bat, or install dependencies manually:
+   cd backend && npm install
+   cd ../frontend && npm install
+3. Start backend and frontend using start-all.bat, or:
+   backend: npm start (or node server.js, depending on package scripts)
+   frontend: npm run dev
+
+Note: Project records marked as demo/illustrative must not be represented as verified government records unless supported by an official source URL and source registry entry.

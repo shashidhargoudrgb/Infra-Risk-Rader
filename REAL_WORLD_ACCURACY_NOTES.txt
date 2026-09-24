@@ -1,0 +1,16 @@
+INFRA RISK RADAR — REAL-WORLD DATA/ACCURACY BUILD
+
+This build preserves the existing Map & Conflict implementation exactly.
+
+Accuracy policy:
+- Official PAIMANA April 2026 portfolio figures are shown as official portfolio context.
+- The application never fabricates project records to make a route look populated.
+- Exact route-project matching requires source-backed Point/LineString/MultiLineString geometry.
+- PAIMANA metadata without authoritative geometry is not treated as an exact map conflict.
+- Risk scores are derived calculations from available project evidence; they are not official PAIMANA risk ratings.
+- Fabricated/hardcoded ML accuracy metrics have been removed. A real ML accuracy score must be generated only after training/testing on a documented historical dataset.
+- OSM construction evidence is supplementary and is not presented as official government project progress.
+
+Official April 2026 PAIMANA snapshot used in UI:
+1,981 ongoing projects; 17 Central Ministries/Departments; original cost approximately ₹37.13 lakh crore; revised cost ₹42.78 lakh crore; expenditure ₹20.36 lakh crore.
+Source: PIB/MoSPI Flash Report, published 25 May 2026.
