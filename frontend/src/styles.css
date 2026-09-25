@@ -197,8 +197,8 @@
 .project-type-icon{width:24px;height:24px;border-radius:50%;display:grid;place-items:center;background:#eaf2ff;color:#1677d3;font-size:10px;font-weight:900}
 .project-type-icon.rail{background:#f0e7fb;color:#7a42b8}.project-type-icon.water{background:#e6f7ff;color:#1389c5}.project-type-icon.electric{background:#fff6dd;color:#d48b00}
 .route-project-card .badge{font-size:8px;padding:3px 6px}
-.route-project-card strong{display:block;font-size:10px;color:#294c70;line-height:1.35;margin-top:7px;height:27px;overflow:hidden}
-.route-project-card small{display:block;font-size:8px;color:#7c90a5;margin-top:3px;height:20px;overflow:hidden}
+.route-project-card strong{display:block;font-size:10px;color:#163b5b;line-height:1.35;margin-top:7px;height:27px;overflow:hidden}
+.route-project-card small{display:block;font-size:8px;color:#546d86;margin-top:3px;height:20px;overflow:hidden}
 .rpc-progress{height:5px;background:#e9eef4;border-radius:10px;overflow:hidden;margin:8px 0 5px}.rpc-progress span{display:block;height:100%;background:#2385df;border-radius:10px}
 .rpc-foot{display:flex;justify-content:space-between;font-size:8px;color:#8192a6}.rpc-foot b{color:#416582}
 .empty-route-projects{grid-column:1/-1;border:1px dashed #cbd9e7;border-radius:8px;padding:20px;text-align:center}.empty-route-projects b{display:block;color:#385a78;font-size:11px}.empty-route-projects span{display:block;color:#8294a7;font-size:9px;margin-top:5px}
@@ -454,8 +454,8 @@ body.map-route-page .reference-project-card.selected{border-color:#1476e4;box-sh
 body.map-route-page .ref-card-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
 body.map-route-page .ref-project-icon{width:27px;height:27px;border-radius:50%;display:grid;place-items:center;color:#fff;font-size:12px;font-weight:900}.ref-project-icon.road{background:#f3a400}.ref-project-icon.bridge{background:#ef3340}.ref-project-icon.water{background:#2478e8}.ref-project-icon.rail{background:#7040b4}
 body.map-route-page .reference-project-card .badge{font-size:7px;padding:3px 5px}
-body.map-route-page .reference-project-card strong{display:block;font-size:9px;line-height:1.25;height:31px;overflow:hidden;color:#20486c}
-body.map-route-page .reference-project-card small{display:block;font-size:8px;line-height:1.3;height:22px;overflow:hidden;color:#71869b}
+body.map-route-page .reference-project-card strong{display:block;font-size:9px;line-height:1.25;height:31px;overflow:hidden;color:#153a5a}
+body.map-route-page .reference-project-card small{display:block;font-size:8px;line-height:1.3;height:22px;overflow:hidden;color:#566d83}
 body.map-route-page .ref-progress{height:5px;background:#e9eef4;border-radius:10px;overflow:hidden;margin:7px 0 5px}.ref-progress span{display:block;height:100%;background:#1476e4;border-radius:10px}
 body.map-route-page .ref-source-badge{display:inline-block;width:max-content;margin-top:5px;padding:3px 7px;border-radius:10px;background:#eef4f8;color:#49677f;font-size:8px;font-weight:800;letter-spacing:.1px}.reference-project-card .ref-source-badge{max-width:100%;white-space:normal}
 body.map-route-page .ref-card-foot{display:flex;flex-direction:column;gap:3px;font-size:7px;color:#5d7790}.ref-card-foot b{color:#1476e4}.reference-project-card .data-source-badge{display:none}
@@ -620,13 +620,13 @@ table th:last-child,table td:last-child{min-width:225px}
 /* Route ongoing-project cards: readable facts instead of collapsed micro-cards. */
 body.map-route-page .reference-project-cards{grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;overflow:visible}
 body.map-route-page .reference-project-card{min-height:215px;padding:11px;border-radius:9px}
-body.map-route-page .reference-project-card strong{font-size:11px;line-height:1.35;height:auto;min-height:32px;max-height:47px;margin-top:7px}
-body.map-route-page .reference-project-card small{font-size:9px;height:auto;min-height:22px;max-height:34px;margin-top:4px}
-body.map-route-page .ref-source-badge{font-size:8px;line-height:1.25;min-height:20px;margin-top:7px}
-body.map-route-page .ref-card-facts{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-top:8px;padding:7px;border:1px solid #e4ebf2;border-radius:7px;background:#f8fbfe;font-size:8px;color:#5b7187}
+body.map-route-page .reference-project-card strong{font-size:11px;line-height:1.35;height:auto;min-height:32px;max-height:47px;margin-top:7px;color:#173c5d}
+body.map-route-page .reference-project-card small{font-size:9px;height:auto;min-height:22px;max-height:34px;margin-top:4px;color:#4f657d}
+body.map-route-page .ref-source-badge{font-size:8px;line-height:1.25;min-height:20px;margin-top:7px;color:#2a4b68}
+body.map-route-page .ref-card-facts{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-top:8px;padding:7px;border:1px solid #e4ebf2;border-radius:7px;background:#f8fbfe;font-size:8px;color:#47627b}
 body.map-route-page .ref-card-facts span:last-child{grid-column:1/-1}
-body.map-route-page .ref-card-facts b{color:#234d72;margin-right:3px}
-body.map-route-page .ref-card-foot{font-size:8px;line-height:1.3;margin-top:7px}
+body.map-route-page .ref-card-facts b{color:#214a6e;margin-right:3px}
+body.map-route-page .ref-card-foot{font-size:8px;line-height:1.3;margin-top:7px;color:#4a647c}
 body.map-route-page .paimana-route-project{border-style:dashed;background:#fffdf7}
 body.map-route-page .mapped-route-project{border-style:dashed}
 body.map-route-page .route-result-summary{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px}
